@@ -19,9 +19,10 @@ export type CyclePreferences = {
 };
 
 export type UserProfile = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   completed: boolean;
   displayName?: string;
+  profileImageUri?: string;
   goals: GoalId[];
   symptomsToTrack: SymptomKey[];
   tracking: TrackingPreferences;
@@ -49,7 +50,7 @@ export const SYMPTOM_LABELS: Record<SymptomKey, string> = {
 
 export function createDefaultUserProfile(): UserProfile {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     completed: false,
     goals: ['triggers', 'digestion'],
     symptomsToTrack: ['pain', 'bloating'],
@@ -65,9 +66,10 @@ function migrateUserProfile(value: unknown): UserProfile {
   const candidate = value as any;
   if (!Array.isArray(candidate.goals) || !Array.isArray(candidate.symptomsToTrack) || !candidate.tracking) return fallback;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     completed: !!candidate.completed,
     displayName: candidate.displayName,
+    profileImageUri: candidate.profileImageUri,
     goals: candidate.goals,
     symptomsToTrack: candidate.symptomsToTrack,
     tracking: {

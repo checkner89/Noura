@@ -52,6 +52,7 @@ const SYMPTOM_META: Array<{ id: SymptomKey; icon: string }> = [
 type Props = {
   initialProfile: UserProfile;
   editing?: boolean;
+  startStep?: number;
   onComplete: (profile: UserProfile, connectAI: boolean) => void;
   onCancel?: () => void;
 };
@@ -99,8 +100,9 @@ function ToggleRow({ title, text, value, onChange, disabled }: {
   );
 }
 
-export default function SetupWizard({ initialProfile, editing = false, onComplete, onCancel }: Props) {
-  const [step, setStep] = useState(editing ? 1 : 0);
+export default function SetupWizard({ initialProfile, editing = false, startStep, onComplete, onCancel }: Props) {
+  const firstStep = editing ? Math.max(1, Math.min(5, startStep ?? 1)) : 0;
+  const [step, setStep] = useState(firstStep);
   const [profile, setProfile] = useState<UserProfile>({ ...initialProfile, tracking: { ...initialProfile.tracking } });
   const [connectAI, setConnectAI] = useState(false);
   const [understandsLocal, setUnderstandsLocal] = useState(editing);
@@ -149,7 +151,7 @@ export default function SetupWizard({ initialProfile, editing = false, onComplet
   };
 
   const back = () => {
-    if (step > (editing ? 1 : 0)) setStep(current => current - 1);
+    if (step > firstStep) setStep(current => current - 1);
     else if (editing && onCancel) onCancel();
   };
 

@@ -155,7 +155,7 @@ export async function loadAIConfig(): Promise<AIConfig | null> {
 }
 
 export async function saveAIConfig(config: AIConfig): Promise<void> {
-  await SecureStore.setItemAsync(CONFIG_KEY, JSON.stringify(config), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
+  await SecureStore.setItemAsync(CONFIG_KEY, JSON.stringify(config), { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK });
 }
 
 export async function clearAIConfig(): Promise<void> { await SecureStore.deleteItemAsync(CONFIG_KEY); }

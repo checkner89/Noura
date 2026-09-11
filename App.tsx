@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -68,6 +70,10 @@ import BarcodeScannerModal from './src/BarcodeScannerModal';
 import { GOAL_LABELS, UserProfile, createDefaultUserProfile, loadUserProfile, saveUserProfile } from './src/onboarding';
 import AIQuickCaptureModal from './src/AIQuickCaptureModal';
 import AddEntrySheet, { ManualEntryMode } from './src/AddEntrySheet';
+import { AppPreferences, defaultAppPreferences, loadAppPreferences, saveAppPreferences } from './src/preferences';
+import { writeAutomaticBackup } from './src/backup';
+import { pickAndPersistProfileImage, removePersistedProfileImage } from './src/profileMedia';
+import { configureDailyAI, loadLatestAIInsight, saveLatestAIInsight, syncDailyAIRegistration } from './src/dailyAI';
 
 type Tab = 'Home' | 'Diary' | 'Tracking' | 'Analyse' | 'KI' | 'Profil';
 type TrackingMode = 'Essen' | 'Symptome' | 'Auffälligkeit' | 'Stuhlgang' | 'Zyklus';
@@ -216,14 +222,29 @@ function SelectionSheet({ visible, title, subtitle, options, selected, searchabl
   );
 }
 
-function Header({ title, subtitle }: { title: string; subtitle?: string }) {
+function getInitials(name?: string) {
+  const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return 'NU';
+}
+
+function ProfileAvatar({ profile, size = 40, onPress }: { profile: UserProfile; size?: number; onPress?: () => void }) {
+  const content = profile.profileImageUri
+    ? <Image source={{ uri: profile.profileImageUri }} style={{ width: size, height: size, borderRadius: size / 2 }} />
+    : <Text style={[styles.avatarText, { fontSize: Math.max(11, size * 0.31) }]}>{getInitials(profile.displayName)}</Text>;
+  const body = <View style={[styles.avatar, { width: size, height: size, borderRadius: size / 2 }]}>{content}</View>;
+  return onPress ? <TouchableOpacity onPress={onPress} activeOpacity={0.8}>{body}</TouchableOpacity> : body;
+}
+
+function Header({ title, subtitle, profile, onAvatarPress }: { title: string; subtitle?: string; profile?: UserProfile; onAvatarPress?: () => void }) {
   return (
     <View style={styles.header}>
       <View style={{ flex: 1 }}>
         <Text style={styles.headerTitle}>{title}</Text>
         {!!subtitle && <Text style={styles.headerSubtitle}>{subtitle}</Text>}
       </View>
-      <View style={styles.avatar}><Text style={styles.avatarText}>N</Text></View>
+      {profile ? <ProfileAvatar profile={profile} onPress={onAvatarPress} /> : null}
     </View>
   );
 }
@@ -249,7 +270,7 @@ function EmptyState({ icon, title, text }: { icon: string; title: string; text: 
   );
 }
 
-function HomeScreen({ store, profile, aiInsight, onAIQuick, onAdd, onOpenInsights, onDiary }: {
+function HomeScreen({ store, profile, aiInsight, onAIQuick, onAdd, onOpenInsights, onDiary, onProfile }: {
   store: HealthStore;
   profile: UserProfile;
   aiInsight: string;
@@ -257,115 +278,87 @@ function HomeScreen({ store, profile, aiInsight, onAIQuick, onAdd, onOpenInsight
   onAdd: (mode: TrackingMode) => void;
   onOpenInsights: () => void;
   onDiary: () => void;
+  onProfile: () => void;
 }) {
   const summary = useMemo(() => getTodaySummary(store), [store]);
-  const todayTimeline = useMemo(() => getTimeline(store, 80).filter(item => isToday(item.createdAt)).slice(0, 8), [store]);
   const cycleContext = useMemo(() => getCycleContext(store), [store]);
   const latestMeal = useMemo(() => store.meals.filter(x => isToday(x.createdAt)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0], [store]);
-  const latestObservation = useMemo(() => store.observations.filter(x => isToday(x.createdAt)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0], [store]);
-  const week = useMemo(() => {
-    const now = new Date();
-    const day = now.getDay() || 7;
-    const monday = new Date(now); monday.setDate(now.getDate() - day + 1);
-    return Array.from({ length: 7 }, (_, index) => {
-      const date = new Date(monday); date.setDate(monday.getDate() + index);
-      return { date, today: date.toDateString() === now.toDateString() };
-    });
-  }, []);
+  const latestSymptom = useMemo(() => store.symptoms.filter(x => isToday(x.createdAt)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0], [store]);
+  const topFood = useMemo(() => computeFoodSignals(store)[0], [store]);
+  const topCycle = useMemo(() => computeCycleSymptomSignals(store).find(x => x.delta > 0.3), [store]);
+
+  const score = useMemo(() => {
+    if (!latestSymptom) return null;
+    const burden = (latestSymptom.pain + latestSymptom.bloating + latestSymptom.nausea + latestSymptom.heartburn) / 4;
+    const raw = 82 - burden * 5.2 - latestSymptom.stress * 1.6 + latestSymptom.energy * 2.8;
+    return Math.max(0, Math.min(100, Math.round(raw)));
+  }, [latestSymptom]);
+
+  const insight = aiInsight
+    ? aiInsight
+    : topFood ? `${topFood.food} fällt wiederholt vor stärkeren Beschwerden auf. Das ist ein Signal, noch keine Ursache.`
+    : topCycle ? `Deine Beschwerden sind in der ${topCycle.phase} bisher etwas stärker als im persönlichen Durchschnitt.`
+    : 'Noch keine belastbare Auffälligkeit. Regelmäßige kurze Einträge machen Muster mit der Zeit sichtbar.';
+
+  const scoreCopy = score == null
+    ? 'Ein kurzer Gefühl-Check-in reicht, damit Noura dein heutiges Tagesbild berechnen kann.'
+    : score >= 75 ? 'Deine heutigen Angaben wirken insgesamt eher ruhig.'
+    : score >= 50 ? 'Heute gibt es ein paar Belastungssignale – beobachte, was dir auffällt.'
+    : 'Deine heutigen Angaben zeigen eine höhere Belastung. Bei starken oder anhaltenden Beschwerden bitte medizinisch abklären.';
 
   return (
-    <ScrollView contentContainerStyle={styles.homeContent} showsVerticalScrollIndicator={false}>
-      <View style={styles.foodlogHeader}>
-        <View>
-          <Text style={styles.foodlogHeaderTitle}>{profile.displayName ? `Hi ${profile.displayName}` : 'Heute'}</Text>
-          <Text style={styles.foodlogHeaderSub}>Dein Körper. Dein Tagebuch.</Text>
-        </View>
-        <TouchableOpacity onPress={onOpenInsights} style={styles.headerSpark}><Text style={styles.headerSparkText}>✦</Text></TouchableOpacity>
-      </View>
-
-      <View style={styles.weekStrip}>
-        {week.map(({ date, today }) => (
-          <View key={date.toISOString()} style={[styles.weekDay, today && styles.weekDayToday]}>
-            <Text style={[styles.weekName, today && styles.weekNameToday]}>{date.toLocaleDateString('de-DE', { weekday: 'short' }).replace('.', '')}</Text>
-            <Text style={[styles.weekNumber, today && styles.weekNumberToday]}>{date.getDate()}</Text>
-          </View>
-        ))}
-      </View>
-
-      <TouchableOpacity style={styles.quickAIHome} onPress={onAIQuick} activeOpacity={0.9}>
-        <View style={styles.quickAIHomeIcon}><Text style={styles.quickAIHomeIconText}>✦</Text></View>
+    <ScrollView contentContainerStyle={styles.simpleHomeContent} showsVerticalScrollIndicator={false}>
+      <View style={styles.simpleHomeHeader}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.quickAIHomeKicker}>SCHNELLSTER WEG</Text>
-          <Text style={styles.quickAIHomeTitle}>Sag Noura, was gerade war</Text>
-          <Text style={styles.quickAIHomeText}>„Ich hatte einen Latte und jetzt Bauchdrücken.“ → prüfen → speichern.</Text>
+          <Text style={styles.simpleHomeGreeting}>{profile.displayName ? `Hi ${profile.displayName.split(' ')[0]}` : 'Heute'}</Text>
+          <Text style={styles.simpleHomeDate}>{new Date().toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: 'long' })}</Text>
         </View>
-        <Text style={styles.quickAIHomeChevron}>›</Text>
+        <ProfileAvatar profile={profile} size={44} onPress={onProfile} />
+      </View>
+
+      <View style={styles.scoreHero}>
+        <View style={styles.scoreHeroCircle}>
+          <Text style={styles.scoreHeroValue}>{score == null ? '–' : score}</Text>
+          <Text style={styles.scoreHeroOf}>/ 100</Text>
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.scoreHeroKicker}>DEIN TAGESBILD</Text>
+          <Text style={styles.scoreHeroTitle}>{score == null ? 'Wie geht es dir heute?' : score >= 75 ? 'Heute wirkt eher ruhig' : score >= 50 ? 'Ein paar Signale im Blick' : 'Heute genauer hinschauen'}</Text>
+          <Text style={styles.scoreHeroText}>{scoreCopy}</Text>
+          {score == null && <TouchableOpacity onPress={() => onAdd('Symptome')} style={styles.scoreHeroButton}><Text style={styles.scoreHeroButtonText}>Gefühl eintragen</Text></TouchableOpacity>}
+        </View>
+      </View>
+
+      <TouchableOpacity style={styles.homeInsightCard} onPress={onOpenInsights} activeOpacity={0.9}>
+        <View style={styles.homeInsightTop}><Text style={styles.homeInsightKicker}>WICHTIGSTE ERKENNTNIS</Text><Text style={styles.homeInsightArrow}>›</Text></View>
+        <Text style={styles.homeInsightText} numberOfLines={3}>{insight}</Text>
+        <Text style={styles.homeInsightFoot}>Tippen für Analyse & Details</Text>
       </TouchableOpacity>
 
-      <View style={styles.sectionHeader}>
-        <View><Text style={styles.sectionTitle}>Schnell eintragen</Text><Text style={styles.helper}>Ein Tap, dann nur das Nötigste.</Text></View>
+      <TouchableOpacity style={styles.tellNouraRow} onPress={onAIQuick} activeOpacity={0.88}>
+        <View style={styles.tellNouraIcon}><Text style={styles.tellNouraIconText}>✦</Text></View>
+        <View style={{ flex: 1 }}><Text style={styles.tellNouraTitle}>Noura einfach erzählen</Text><Text style={styles.tellNouraSub}>Essen, Gefühl oder Auffälligkeit in einem Satz.</Text></View>
+        <Text style={styles.tellNouraArrow}>›</Text>
+      </TouchableOpacity>
+
+      <View style={styles.homeQuickRow}>
+        <TouchableOpacity style={styles.homeQuickButton} onPress={() => onAdd('Essen')}><Text style={styles.homeQuickIcon}>🍽</Text><Text style={styles.homeQuickText}>Essen</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.homeQuickButton} onPress={() => onAdd('Symptome')}><Text style={styles.homeQuickIcon}>◌</Text><Text style={styles.homeQuickText}>Gefühl</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.homeQuickButton} onPress={() => onAdd('Auffälligkeit')}><Text style={styles.homeQuickIcon}>!</Text><Text style={styles.homeQuickText}>Auffällig</Text></TouchableOpacity>
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickActionRow}>
-        <TouchableOpacity style={[styles.quickActionCard, { backgroundColor: colors.greenSoft }]} onPress={() => onAdd('Essen')}>
-          <Text style={styles.quickActionIcon}>🍽️</Text><Text style={styles.quickActionTitle}>Essen</Text><Text style={styles.quickActionSub}>Was gerade?</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.quickActionCard, { backgroundColor: colors.orangeSoft }]} onPress={() => onAdd('Symptome')}>
-          <Text style={styles.quickActionIcon}>◌</Text><Text style={styles.quickActionTitle}>Gefühl</Text><Text style={styles.quickActionSub}>Wie geht's?</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.quickActionCard, { backgroundColor: '#FFF6DA' }]} onPress={() => onAdd('Auffälligkeit')}>
-          <Text style={styles.quickActionIcon}>!</Text><Text style={styles.quickActionTitle}>Auffällig</Text><Text style={styles.quickActionSub}>Kurz merken</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.quickActionCard, { backgroundColor: colors.blueSoft }]} onPress={() => onAdd('Stuhlgang')}>
-          <Text style={styles.quickActionIcon}>◉</Text><Text style={styles.quickActionTitle}>Stuhlgang</Text><Text style={styles.quickActionSub}>Dokumentieren</Text>
-        </TouchableOpacity>
-        {profile.tracking.cycle && <TouchableOpacity style={[styles.quickActionCard, { backgroundColor: colors.purpleSoft }]} onPress={() => onAdd('Zyklus')}>
-          <Text style={styles.quickActionIcon}>◐</Text><Text style={styles.quickActionTitle}>Zyklus</Text><Text style={styles.quickActionSub}>{cycleContext.estimatedCycleDay ? `Tag ${cycleContext.estimatedCycleDay}` : 'Eintragen'}</Text>
-        </TouchableOpacity>}
-      </ScrollView>
 
-      {(latestMeal || latestObservation) && (
-        <View style={styles.nowGrid}>
-          {latestMeal && <TouchableOpacity style={styles.nowCard} onPress={onDiary}>
-            <Text style={styles.nowKicker}>ZULETZT GEGESSEN</Text>
-            <Text style={styles.nowTitle} numberOfLines={1}>{latestMeal.foods.map(x => x.name).join(', ')}</Text>
-            <Text style={styles.nowSub}>{new Date(latestMeal.createdAt).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} · {latestMeal.mealType}</Text>
-          </TouchableOpacity>}
-          {latestObservation && <TouchableOpacity style={[styles.nowCard, styles.nowCardObservation]} onPress={onDiary}>
-            <Text style={[styles.nowKicker, { color: '#9A7825' }]}>AUFFÄLLIGKEIT</Text>
-            <Text style={styles.nowTitle} numberOfLines={2}>{latestObservation.text}</Text>
-            <Text style={styles.nowSub}>{new Date(latestObservation.createdAt).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</Text>
-          </TouchableOpacity>}
+      <View style={styles.homeTodayCard}>
+        <View style={styles.homeTodayHeader}><Text style={styles.homeTodayTitle}>Heute</Text><TouchableOpacity onPress={onDiary}><Text style={styles.homeTodayLink}>Tagebuch ›</Text></TouchableOpacity></View>
+        <View style={styles.homeTodayStats}>
+          <View style={styles.homeTodayStat}><Text style={styles.homeTodayValue}>{summary.mealCount}</Text><Text style={styles.homeTodayLabel}>Mahlzeiten</Text></View>
+          <View style={styles.homeTodayStat}><Text style={styles.homeTodayValue}>{store.symptoms.filter(x => isToday(x.createdAt)).length}</Text><Text style={styles.homeTodayLabel}>Check-ins</Text></View>
+          <View style={styles.homeTodayStat}><Text style={styles.homeTodayValue}>{store.bowel.filter(x => isToday(x.createdAt)).length}</Text><Text style={styles.homeTodayLabel}>Stuhlgang</Text></View>
         </View>
-      )}
-
-      {!!aiInsight && (
-        <TouchableOpacity onPress={onOpenInsights} style={styles.miniInsightCard} activeOpacity={0.9}>
-          <View style={styles.miniInsightIcon}><Text style={{ color: colors.purple, fontWeight: '900' }}>✦</Text></View>
-          <View style={{ flex: 1 }}><Text style={styles.miniInsightKicker}>LETZTER KI-HINWEIS</Text><Text style={styles.miniInsightText} numberOfLines={2}>{aiInsight}</Text></View>
-          <Text style={styles.chevron}>›</Text>
-        </TouchableOpacity>
-      )}
-
-      <View style={styles.sectionHeader}>
-        <View><Text style={styles.sectionTitle}>Heute</Text><Text style={styles.helper}>{summary.trackedToday ? `${summary.trackedToday} Einträge` : 'Noch nichts eingetragen'}</Text></View>
-        <TouchableOpacity onPress={onDiary}><Text style={styles.link}>Alle Einträge</Text></TouchableOpacity>
+        {latestMeal && <View style={styles.homeLastRow}><Text style={styles.homeLastLabel}>Zuletzt gegessen</Text><Text style={styles.homeLastValue} numberOfLines={1}>{latestMeal.foods.map(x => x.name).join(', ')}</Text></View>}
+        {profile.tracking.cycle && <View style={styles.homeLastRow}><Text style={styles.homeLastLabel}>Zyklus</Text><Text style={styles.homeLastValue}>{cycleContext.bleedingToday ? 'Periode heute' : cycleContext.estimatedCycleDay ? `ca. Tag ${cycleContext.estimatedCycleDay} · ${cycleContext.estimatedPhase || ''}` : 'Noch zu wenig Daten'}</Text></View>}
       </View>
-      {todayTimeline.length ? (
-        <View style={styles.diaryCard}>{todayTimeline.map((item, index) => <TimelineRow key={`${item.kind}-${item.id}`} item={item} border={index < todayTimeline.length - 1} />)}</View>
-      ) : (
-        <TouchableOpacity onPress={onAIQuick} style={styles.homeEmpty}>
-          <Text style={styles.homeEmptyIcon}>＋</Text>
-          <Text style={styles.homeEmptyTitle}>Dein Tag ist noch leer</Text>
-          <Text style={styles.homeEmptyText}>Erzähl Noura kurz, was du gegessen hast oder wie du dich fühlst.</Text>
-        </TouchableOpacity>
-      )}
 
-      {profile.tracking.cycle && cycleContext.estimatedPhase && cycleContext.estimatedPhase !== 'Unklar' && (
-        <View style={styles.cycleContextCard}>
-          <Text style={styles.cycleContextIcon}>◐</Text>
-          <View style={{ flex: 1 }}><Text style={styles.cycleContextTitle}>{cycleContext.estimatedPhase}</Text><Text style={styles.cycleContextText}>{cycleContext.estimatedCycleDay ? `Geschätzter Zyklustag ${cycleContext.estimatedCycleDay}. ` : ''}Noura nutzt das nur als Kontext für spätere Muster.</Text></View>
-        </View>
-      )}
+      <Text style={styles.homeScoreDisclaimer}>Der Tages-Score ist eine vereinfachte Darstellung deiner eigenen Angaben und keine medizinische Bewertung.</Text>
     </ScrollView>
   );
 }
@@ -962,6 +955,7 @@ function AnalyseScreen({ store, onOpenAI }: { store: HealthStore; onOpenAI: () =
   const trends = useMemo(() => buildDailyTrends(store, Math.min(days, 30)), [store, days]);
   const trackingDays = useMemo(() => getTrackingDays(store), [store]);
   const recordCount = store.meals.length + store.symptoms.length + store.bowel.length + store.cycle.length + store.observations.length;
+
   const topSignal = signals[0];
   const topCycle = cycleSignals[0];
 
@@ -1055,23 +1049,26 @@ function AnalyseScreen({ store, onOpenAI }: { store: HealthStore; onOpenAI: () =
   );
 }
 
-function AIScreen({ config, store, consent, scope, onConsentChange, onScopeChange, onOpenSettings, onInsight }: {
+function AIScreen({ config, store, consent, scope, initialResult, onConsentChange, onScopeChange, onOpenSettings, onInsight }: {
   config: AIConfig | null;
   store: HealthStore;
   consent: boolean;
   scope: AIDataScope;
+  initialResult?: AIHealthInsight | null;
   onConsentChange: (value: boolean) => void;
   onScopeChange: (scope: AIDataScope) => void;
   onOpenSettings: () => void;
   onInsight: (text: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<AIHealthInsight | null>(null);
+  const [result, setResult] = useState<AIHealthInsight | null>(initialResult || null);
   const [error, setError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
   const trackingDays = useMemo(() => getTrackingDays(store), [store]);
   const signalCount = useMemo(() => computeFoodSignals(store).length + computeCycleSymptomSignals(store).filter(x => x.delta > 0.3).length, [store]);
   const recordCount = store.meals.length + store.symptoms.length + store.bowel.length + store.cycle.length + store.observations.length;
+
+  useEffect(() => { if (initialResult) setResult(initialResult); }, [initialResult]);
 
   const runAI = async () => {
     if (!config) return;
@@ -1082,6 +1079,7 @@ function AIScreen({ config, store, consent, scope, onConsentChange, onScopeChang
       const insight = await generateHealthInsight(config, store, scope);
       setResult(insight);
       onInsight(`${insight.headline}: ${insight.summary}`);
+      saveLatestAIInsight(insight, false).catch(() => undefined);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Die KI-Anfrage ist fehlgeschlagen.');
     } finally {
@@ -1192,63 +1190,94 @@ function AIScreen({ config, store, consent, scope, onConsentChange, onScopeChang
   );
 }
 
-function ProfileScreen({ config, store, profile, onOpenSettings, onEditSetup, onLoadDemo, onClearData }: {
+function ProfileSettingRow({ icon, title, detail, onPress, right }: { icon: string; title: string; detail?: string; onPress?: () => void; right?: React.ReactNode }) {
+  const body = (
+    <View style={styles.profileSettingRow}>
+      <View style={styles.profileSettingIcon}><Text style={styles.profileSettingIconText}>{icon}</Text></View>
+      <View style={{ flex: 1, minWidth: 0 }}><Text style={styles.profileSettingTitle}>{title}</Text>{!!detail && <Text style={styles.profileSettingDetail} numberOfLines={2}>{detail}</Text>}</View>
+      {right ?? (onPress ? <Text style={styles.profileSettingChevron}>›</Text> : null)}
+    </View>
+  );
+  return onPress ? <TouchableOpacity onPress={onPress} activeOpacity={0.75}>{body}</TouchableOpacity> : body;
+}
+
+function ProfileScreen({ config, store, profile, preferences, aiConsent, onOpenSettings, onEditSetup, onPickProfileImage, onRemoveProfileImage, onToggleBackup, onToggleDailyAI, onBackupNow, onLoadDemo, onClearData }: {
   config: AIConfig | null;
   store: HealthStore;
   profile: UserProfile;
+  preferences: AppPreferences;
+  aiConsent: boolean;
   onOpenSettings: () => void;
-  onEditSetup: () => void;
+  onEditSetup: (step: number) => void;
+  onPickProfileImage: () => void;
+  onRemoveProfileImage: () => void;
+  onToggleBackup: (enabled: boolean) => void;
+  onToggleDailyAI: (enabled: boolean) => void;
+  onBackupNow: () => void;
   onLoadDemo: () => void;
   onClearData: () => void;
 }) {
+  const backupLabel = preferences.lastBackupAt ? `Zuletzt ${new Date(preferences.lastBackupAt).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : 'Noch kein Backup-Snapshot erstellt';
+  const dailyLabel = preferences.lastBackgroundAIAt ? `Letzte automatische Analyse ${new Date(preferences.lastBackgroundAIAt).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : 'Noch keine automatische Analyse';
   return (
-    <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
-      <Header title="Profil" subtitle={profile.displayName ? `${profile.displayName} · Daten, Datenschutz & Verbindungen` : "Daten, Datenschutz & Verbindungen"} />
+    <ScrollView contentContainerStyle={styles.profilePageContent} showsVerticalScrollIndicator={false}>
+      <View style={styles.profileTopBar}><View><Text style={styles.profilePageTitle}>Profil</Text><Text style={styles.profilePageSub}>Persönlich, Tracking & Automationen</Text></View></View>
 
-      <TouchableOpacity onPress={onEditSetup}>
-        <ShadowCard style={styles.clickableCard}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.cardTitle}>Einrichtung & Tracking</Text>
-            <Text style={styles.helper}>{profile.goals.map(goal => GOAL_LABELS[goal]).slice(0, 2).join(' · ') || 'Ziele und Tracking anpassen'}</Text>
+      <View style={styles.profileHero}>
+        <ProfileAvatar profile={profile} size={76} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.profileHeroName}>{profile.displayName || 'Dein Profil'}</Text>
+          <Text style={styles.profileHeroSub}>{profile.profileImageUri ? 'Profilbild aktiv' : `Initialen: ${getInitials(profile.displayName)}`}</Text>
+          <View style={styles.profilePhotoActions}>
+            <TouchableOpacity onPress={onPickProfileImage}><Text style={styles.profilePhotoLink}>{profile.profileImageUri ? 'Bild ändern' : 'Profilbild wählen'}</Text></TouchableOpacity>
+            {!!profile.profileImageUri && <TouchableOpacity onPress={onRemoveProfileImage}><Text style={styles.profilePhotoRemove}>Entfernen</Text></TouchableOpacity>}
           </View>
-          <Text style={styles.chevronSmall}>›</Text>
-        </ShadowCard>
-      </TouchableOpacity>
+        </View>
+      </View>
 
-      <ShadowCard>
-        <Text style={styles.cardTitle}>Deine Daten</Text>
-        <View style={styles.profileStatRow}><Text style={styles.settingLabel}>Mahlzeiten</Text><Text style={styles.settingValue}>{store.meals.length}</Text></View>
-        <View style={styles.profileStatRow}><Text style={styles.settingLabel}>Symptom-Check-ins</Text><Text style={styles.settingValue}>{store.symptoms.length}</Text></View>
-        <View style={styles.profileStatRow}><Text style={styles.settingLabel}>Stuhlgang-Einträge</Text><Text style={styles.settingValue}>{store.bowel.length}</Text></View>
-        <View style={styles.profileStatRow}><Text style={styles.settingLabel}>Zyklus-Check-ins</Text><Text style={styles.settingValue}>{store.cycle.length}</Text></View>
-        <View style={styles.profileStatRow}><Text style={styles.settingLabel}>Auffälligkeiten</Text><Text style={styles.settingValue}>{store.observations.length}</Text></View>
-        <View style={styles.profileStatRow}><Text style={styles.settingLabel}>Tracking-Tage</Text><Text style={styles.settingValue}>{getTrackingDays(store)}</Text></View>
-      </ShadowCard>
+      <Text style={styles.profileSectionLabel}>DEINE EINSTELLUNGEN</Text>
+      <View style={styles.profileSettingsCard}>
+        <ProfileSettingRow icon="◉" title="Name & Ziele" detail={`${profile.displayName || 'Kein Name'} · ${profile.goals.length} Ziele`} onPress={() => onEditSetup(1)} />
+        <View style={styles.profileSettingDivider} />
+        <ProfileSettingRow icon="☷" title="Tracking-Bereiche" detail={[profile.tracking.meals && 'Essen', profile.tracking.symptoms && 'Gefühl', profile.tracking.bowel && 'Stuhlgang', profile.tracking.cycle && 'Zyklus'].filter(Boolean).join(' · ')} onPress={() => onEditSetup(2)} />
+        <View style={styles.profileSettingDivider} />
+        <ProfileSettingRow icon="♡" title="Körper-Check-in" detail={`${profile.symptomsToTrack.length} Symptome · ${profile.tracking.temperature ? 'Temperatur · ' : ''}${profile.tracking.energy ? 'Energie · ' : ''}${profile.tracking.stress ? 'Stress' : ''}`.replace(/ · $/, '')} onPress={() => onEditSetup(3)} />
+        <View style={styles.profileSettingDivider} />
+        <ProfileSettingRow icon="◐" title="Zyklus" detail={profile.tracking.cycle ? 'Aktiv und in Analysen einbezogen' : 'Deaktiviert'} onPress={() => onEditSetup(2)} />
+        <View style={styles.profileSettingDivider} />
+        <ProfileSettingRow icon="✓" title="Datenschutz & Hinweise" detail="Freigaben und medizinische Hinweise" onPress={() => onEditSetup(5)} />
+      </View>
 
-      <TouchableOpacity onPress={onOpenSettings}>
-        <ShadowCard style={styles.clickableCard}>
-          <View style={{ flex: 1 }}><Text style={styles.cardTitle}>Meine KI</Text><Text style={styles.helper}>{config ? `${PROVIDER_META[config.provider].label} · ${config.model}` : 'Eigenen Anbieter verbinden'}</Text></View>
-          <Text style={styles.chevronSmall}>›</Text>
-        </ShadowCard>
-      </TouchableOpacity>
+      <Text style={styles.profileSectionLabel}>KI</Text>
+      <View style={styles.profileSettingsCard}>
+        <ProfileSettingRow icon="✦" title="Anbieter & Modell" detail={config ? `${PROVIDER_META[config.provider].label} · ${config.model}` : 'Noch keine eigene KI verbunden'} onPress={onOpenSettings} />
+        <View style={styles.profileSettingDivider} />
+        <ProfileSettingRow icon="↻" title="Tägliche automatische KI-Analyse" detail={`${dailyLabel}. iOS entscheidet den tatsächlichen Ausführungszeitpunkt.`} right={<Switch value={preferences.dailyAIEnabled} onValueChange={onToggleDailyAI} trackColor={{ true: '#C6B4D8' }} thumbColor={preferences.dailyAIEnabled ? colors.purple : undefined} />} />
+        {preferences.dailyAIEnabled && (!config || !aiConsent) && <View style={styles.profileInlineWarning}><Text style={styles.profileInlineWarningText}>Für die automatische Analyse brauchst du eine verbundene KI und aktivierte Datenfreigabe.</Text></View>}
+      </View>
 
-      <ShadowCard style={styles.privacyCard}>
-        <Text style={styles.privacyKicker}>MVP-DATENSCHUTZ</Text>
-        <Text style={styles.cardTitle}>Gesundheitsdaten bleiben aktuell lokal auf dem Gerät.</Text>
-        <Text style={styles.bodyText}>In dieser Testversion nutzen wir noch einen einfachen lokalen Persistenzspeicher. Vor einer produktiven Veröffentlichung muss die Gesundheitsdatenhaltung verschlüsselt, migrationsfähig und regulatorisch geprüft werden.</Text>
-      </ShadowCard>
+      <Text style={styles.profileSectionLabel}>BACKUP & DATEN</Text>
+      <View style={styles.profileSettingsCard}>
+        <ProfileSettingRow icon="☁" title="Automatischer iCloud-Gerätebackup-Snapshot" detail={`${backupLabel}. Die Backup-Datei enthält keine API-Keys.`} right={<Switch value={preferences.iCloudBackupEnabled} onValueChange={onToggleBackup} trackColor={{ true: '#B8DCC1' }} thumbColor={preferences.iCloudBackupEnabled ? colors.green : undefined} />} />
+        <View style={styles.profileSettingDivider} />
+        <ProfileSettingRow icon="↓" title="Backup jetzt aktualisieren" detail="Speichert Tagebuch & Profil im Documents-Bereich" onPress={onBackupNow} />
+      </View>
+
+      <View style={styles.profileStatsCompact}>
+        <View><Text style={styles.profileStatsValue}>{getTrackingDays(store)}</Text><Text style={styles.profileStatsLabel}>Tracking-Tage</Text></View>
+        <View><Text style={styles.profileStatsValue}>{store.meals.length}</Text><Text style={styles.profileStatsLabel}>Mahlzeiten</Text></View>
+        <View><Text style={styles.profileStatsValue}>{store.symptoms.length}</Text><Text style={styles.profileStatsLabel}>Check-ins</Text></View>
+      </View>
 
       <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert('Demo-Daten laden?', 'Damit wird dein aktueller lokaler Datenbestand durch Beispieldaten ersetzt.', [
-        { text: 'Abbrechen', style: 'cancel' },
-        { text: 'Demo laden', onPress: onLoadDemo },
+        { text: 'Abbrechen', style: 'cancel' }, { text: 'Demo laden', onPress: onLoadDemo },
       ])}><Text style={styles.secondaryButtonText}>Demo-Daten laden</Text></TouchableOpacity>
 
       <TouchableOpacity style={styles.destructiveButton} onPress={() => Alert.alert('Alle Trackingdaten löschen?', 'Dieser Vorgang kann in der App nicht rückgängig gemacht werden.', [
-        { text: 'Abbrechen', style: 'cancel' },
-        { text: 'Alle löschen', style: 'destructive', onPress: onClearData },
+        { text: 'Abbrechen', style: 'cancel' }, { text: 'Alle löschen', style: 'destructive', onPress: onClearData },
       ])}><Text style={styles.destructiveButtonText}>Alle Trackingdaten löschen</Text></TouchableOpacity>
 
-      <Text style={styles.versionLabel}>Noura MVP · Version 0.9</Text>
+      <Text style={styles.versionLabel}>Noura MVP · Version 0.12</Text>
     </ScrollView>
   );
 }
@@ -1482,32 +1511,62 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('Home');
   const [store, setStore] = useState<HealthStore>(emptyHealthStore());
   const [userProfile, setUserProfile] = useState<UserProfile>(createDefaultUserProfile());
-  const [editingSetup, setEditingSetup] = useState(false);
+  const [editingSetupStep, setEditingSetupStep] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [aiConfig, setAIConfig] = useState<AIConfig | null>(null);
   const [aiConsent, setAIConsentState] = useState(false);
   const [aiScope, setAIScopeState] = useState<AIDataScope>('summary');
   const [aiSettingsOpen, setAISettingsOpen] = useState(false);
   const [aiInsight, setAIInsight] = useState('');
+  const [latestAIResult, setLatestAIResult] = useState<AIHealthInsight | null>(null);
   const [addSheetOpen, setAddSheetOpen] = useState(false);
   const [quickAIOpen, setQuickAIOpen] = useState(false);
   const [trackingMode, setTrackingMode] = useState<TrackingMode>('Essen');
+  const [preferences, setPreferences] = useState<AppPreferences>(defaultAppPreferences());
 
   useEffect(() => {
-    Promise.all([loadHealthStore(), loadAIConfig(), loadAIConsent(), loadAIDataScope(), loadUserProfile()])
-      .then(([health, config, consent, scope, profile]) => {
+    Promise.all([loadHealthStore(), loadAIConfig(), loadAIConsent(), loadAIDataScope(), loadUserProfile(), loadAppPreferences(), loadLatestAIInsight()])
+      .then(([health, config, consent, scope, profile, prefs, latest]) => {
         setStore(health);
         setAIConfig(config);
         setAIConsentState(consent);
         setAIScopeState(scope);
         setUserProfile(profile);
+        setPreferences(prefs);
+        if (latest?.insight) { setLatestAIResult(latest.insight); setAIInsight(`${latest.insight.headline}: ${latest.insight.summary}`); }
+        syncDailyAIRegistration().catch(() => undefined);
       })
       .finally(() => setHydrated(true));
   }, []);
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        loadLatestAIInsight().then(latest => {
+          if (latest?.insight) { setLatestAIResult(latest.insight); setAIInsight(`${latest.insight.headline}: ${latest.insight.summary}`); }
+        }).catch(() => undefined);
+        loadAppPreferences().then(setPreferences).catch(() => undefined);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  const updateBackupStamp = (value: AppPreferences) => {
+    const stamped = { ...value, lastBackupAt: new Date().toISOString() };
+    setPreferences(stamped);
+    saveAppPreferences(stamped).catch(() => undefined);
+  };
+
+  const runBackup = async (nextStore: HealthStore = store, nextProfile: UserProfile = userProfile, prefs: AppPreferences = preferences) => {
+    if (!prefs.iCloudBackupEnabled) return;
+    await writeAutomaticBackup(nextStore, nextProfile, prefs);
+    updateBackupStamp(prefs);
+  };
+
   const commit = (next: HealthStore) => {
     setStore(next);
     saveHealthStore(next).catch(() => Alert.alert('Speichern fehlgeschlagen', 'Der Eintrag konnte lokal nicht dauerhaft gespeichert werden.'));
+    if (preferences.iCloudBackupEnabled) runBackup(next, userProfile, preferences).catch(() => undefined);
   };
 
   const changeConsent = (value: boolean) => {
@@ -1533,11 +1592,62 @@ export default function App() {
   };
 
   const completeSetup = (profile: UserProfile, connectAI: boolean) => {
+    const wasEditing = editingSetupStep !== null;
     setUserProfile(profile);
-    setEditingSetup(false);
+    setEditingSetupStep(null);
     saveUserProfile(profile).catch(() => Alert.alert('Speichern fehlgeschlagen', 'Deine Einrichtung konnte nicht dauerhaft gespeichert werden.'));
-    setTab('Home');
+    if (preferences.iCloudBackupEnabled) runBackup(store, profile, preferences).catch(() => undefined);
+    setTab(wasEditing ? 'Profil' : 'Home');
     if (connectAI) setAISettingsOpen(true);
+  };
+
+  const pickProfileImage = async () => {
+    try {
+      const uri = await pickAndPersistProfileImage();
+      if (!uri) return;
+      const next = { ...userProfile, profileImageUri: uri };
+      setUserProfile(next);
+      await saveUserProfile(next);
+      if (preferences.iCloudBackupEnabled) await runBackup(store, next, preferences);
+    } catch (e) {
+      Alert.alert('Profilbild nicht geändert', e instanceof Error ? e.message : 'Das Bild konnte nicht ausgewählt werden.');
+    }
+  };
+
+  const removeProfileImage = async () => {
+    const next = { ...userProfile, profileImageUri: undefined };
+    setUserProfile(next);
+    await saveUserProfile(next);
+    await removePersistedProfileImage();
+    if (preferences.iCloudBackupEnabled) runBackup(store, next, preferences).catch(() => undefined);
+  };
+
+  const toggleBackup = async (enabled: boolean) => {
+    const next = { ...preferences, iCloudBackupEnabled: enabled };
+    setPreferences(next);
+    await saveAppPreferences(next);
+    if (enabled) {
+      try { await writeAutomaticBackup(store, userProfile, next); updateBackupStamp(next); }
+      catch { Alert.alert('Backup konnte nicht erstellt werden', 'Noura konnte die lokale Backup-Datei nicht aktualisieren.'); }
+    }
+  };
+
+  const backupNow = async () => {
+    try {
+      await writeAutomaticBackup(store, userProfile, preferences);
+      updateBackupStamp(preferences);
+      Alert.alert('Backup aktualisiert', 'Noura hat einen aktuellen Backup-Snapshot im Documents-Bereich gespeichert. iOS kann diesen über das Gerätebackup in iCloud sichern.');
+    } catch {
+      Alert.alert('Backup fehlgeschlagen', 'Der Backup-Snapshot konnte nicht gespeichert werden.');
+    }
+  };
+
+  const toggleDailyAI = async (enabled: boolean) => {
+    const next = await configureDailyAI(enabled);
+    setPreferences(next);
+    if (enabled && (!aiConfig || !aiConsent)) {
+      Alert.alert('Automatische KI vorbereitet', 'Aktiviere zusätzlich eine KI-Verbindung und die Datenfreigabe. Erst dann kann Noura im Hintergrund analysieren.');
+    }
   };
 
   const openManual = (mode: ManualEntryMode | TrackingMode) => {
@@ -1589,8 +1699,9 @@ export default function App() {
     );
   }
 
-  if (!userProfile.completed || editingSetup) {
-    return <SetupWizard initialProfile={userProfile} editing={editingSetup} onCancel={editingSetup ? () => setEditingSetup(false) : undefined} onComplete={completeSetup} />;
+  if (!userProfile.completed || editingSetupStep !== null) {
+    const editing = editingSetupStep !== null;
+    return <SetupWizard initialProfile={userProfile} editing={editing} startStep={editingSetupStep ?? undefined} onCancel={editing ? () => setEditingSetupStep(null) : undefined} onComplete={completeSetup} />;
   }
 
   const screen = tab === 'Home'
@@ -1602,6 +1713,7 @@ export default function App() {
         onAdd={openManual}
         onOpenInsights={() => setTab('KI')}
         onDiary={() => setTab('Diary')}
+        onProfile={() => setTab('Profil')}
       />
     : tab === 'Diary'
       ? <DiaryScreen store={store} onDelete={(kind, id) => commit(removeEntry(store, kind, id))} onAdd={() => setAddSheetOpen(true)} />
@@ -1625,6 +1737,7 @@ export default function App() {
           store={store}
           consent={aiConsent}
           scope={aiScope}
+          initialResult={latestAIResult}
           onConsentChange={changeConsent}
           onScopeChange={changeScope}
           onOpenSettings={() => setAISettingsOpen(true)}
@@ -1634,8 +1747,15 @@ export default function App() {
           config={aiConfig}
           store={store}
           profile={userProfile}
+          preferences={preferences}
+          aiConsent={aiConsent}
           onOpenSettings={() => setAISettingsOpen(true)}
-          onEditSetup={() => setEditingSetup(true)}
+          onEditSetup={step => setEditingSetupStep(step)}
+          onPickProfileImage={pickProfileImage}
+          onRemoveProfileImage={removeProfileImage}
+          onToggleBackup={enabled => { toggleBackup(enabled).catch(() => undefined); }}
+          onToggleDailyAI={enabled => { toggleDailyAI(enabled).catch(() => undefined); }}
+          onBackupNow={() => { backupNow().catch(() => undefined); }}
           onLoadDemo={loadDemo}
           onClearData={clearAllData}
         />;
@@ -1688,6 +1808,73 @@ const styles = StyleSheet.create({
   loadingScreen: { alignItems: 'center', justifyContent: 'center', gap: 20 },
   loadingLogo: { fontSize: 36, fontWeight: '900', color: colors.green, letterSpacing: -1 },
   screenContent: { padding: 20, paddingBottom: 34, gap: 14 },
+
+  simpleHomeContent: { paddingHorizontal: 18, paddingTop: 14, paddingBottom: 118, gap: 14 },
+  simpleHomeHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 2 },
+  simpleHomeGreeting: { color: colors.text, fontSize: 28, fontWeight: '900', letterSpacing: -0.7 },
+  simpleHomeDate: { color: colors.muted, fontSize: 12.5, marginTop: 2 },
+  scoreHero: { flexDirection: 'row', alignItems: 'center', gap: 16, backgroundColor: '#F0F5F1', borderRadius: 26, padding: 18, borderWidth: 1, borderColor: '#DFE9E1' },
+  scoreHeroCircle: { width: 86, height: 86, borderRadius: 43, backgroundColor: '#FFFFFF', borderWidth: 7, borderColor: '#8DB799', alignItems: 'center', justifyContent: 'center' },
+  scoreHeroValue: { color: colors.text, fontSize: 28, fontWeight: '900', lineHeight: 30 },
+  scoreHeroOf: { color: colors.muted, fontSize: 9.5, fontWeight: '700' },
+  scoreHeroKicker: { color: colors.greenDark, fontSize: 9, fontWeight: '900', letterSpacing: 1.0 },
+  scoreHeroTitle: { color: colors.text, fontSize: 17, lineHeight: 21, fontWeight: '900', marginTop: 4 },
+  scoreHeroText: { color: colors.muted, fontSize: 11.2, lineHeight: 16, marginTop: 4 },
+  scoreHeroButton: { alignSelf: 'flex-start', marginTop: 9, backgroundColor: colors.green, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7 },
+  scoreHeroButtonText: { color: '#FFF', fontSize: 10.5, fontWeight: '800' },
+  homeInsightCard: { backgroundColor: colors.surface, borderRadius: 22, padding: 16, borderWidth: 1, borderColor: colors.line },
+  homeInsightTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  homeInsightKicker: { color: colors.purple, fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  homeInsightArrow: { color: colors.purple, fontSize: 26, lineHeight: 26 },
+  homeInsightText: { color: colors.text, fontSize: 15.5, lineHeight: 21, fontWeight: '800', marginTop: 7 },
+  homeInsightFoot: { color: colors.muted, fontSize: 10.5, marginTop: 8 },
+  tellNouraRow: { flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: colors.purple, borderRadius: 21, padding: 13 },
+  tellNouraIcon: { width: 40, height: 40, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
+  tellNouraIconText: { color: '#FFF', fontSize: 19, fontWeight: '900' },
+  tellNouraTitle: { color: '#FFF', fontSize: 14.5, fontWeight: '900' },
+  tellNouraSub: { color: '#ECE6F2', fontSize: 10.2, marginTop: 2, lineHeight: 14 },
+  tellNouraArrow: { color: '#FFF', fontSize: 27 },
+  homeQuickRow: { flexDirection: 'row', gap: 9 },
+  homeQuickButton: { flex: 1, backgroundColor: colors.surface, borderRadius: 18, borderWidth: 1, borderColor: colors.line, minHeight: 72, alignItems: 'center', justifyContent: 'center', padding: 8 },
+  homeQuickIcon: { fontSize: 18, marginBottom: 5 },
+  homeQuickText: { color: colors.text, fontSize: 11.5, fontWeight: '800' },
+  homeTodayCard: { backgroundColor: colors.surface, borderRadius: 22, borderWidth: 1, borderColor: colors.line, padding: 16 },
+  homeTodayHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  homeTodayTitle: { color: colors.text, fontSize: 16, fontWeight: '900' },
+  homeTodayLink: { color: colors.purple, fontSize: 11.5, fontWeight: '800' },
+  homeTodayStats: { flexDirection: 'row', marginTop: 14, marginBottom: 12 },
+  homeTodayStat: { flex: 1, alignItems: 'center', borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: colors.line },
+  homeTodayValue: { color: colors.text, fontSize: 20, fontWeight: '900' },
+  homeTodayLabel: { color: colors.muted, fontSize: 9.5, marginTop: 2 },
+  homeLastRow: { flexDirection: 'row', alignItems: 'center', gap: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, paddingTop: 10, marginTop: 2 },
+  homeLastLabel: { color: colors.muted, fontSize: 10.5, width: 88 },
+  homeLastValue: { flex: 1, color: colors.text, fontSize: 11.5, fontWeight: '700', textAlign: 'right' },
+  homeScoreDisclaimer: { color: colors.muted, fontSize: 9.5, lineHeight: 14, textAlign: 'center', paddingHorizontal: 18 },
+
+  profilePageContent: { paddingHorizontal: 18, paddingTop: 14, paddingBottom: 120, gap: 12 },
+  profileTopBar: { marginBottom: 2 },
+  profilePageTitle: { color: colors.text, fontSize: 30, fontWeight: '900', letterSpacing: -0.8 },
+  profilePageSub: { color: colors.muted, fontSize: 12.5, marginTop: 2 },
+  profileHero: { flexDirection: 'row', alignItems: 'center', gap: 15, backgroundColor: colors.surface, borderRadius: 24, padding: 16, borderWidth: 1, borderColor: colors.line },
+  profileHeroName: { color: colors.text, fontSize: 18, fontWeight: '900' },
+  profileHeroSub: { color: colors.muted, fontSize: 11, marginTop: 3 },
+  profilePhotoActions: { flexDirection: 'row', gap: 14, marginTop: 9 },
+  profilePhotoLink: { color: colors.purple, fontSize: 11, fontWeight: '800' },
+  profilePhotoRemove: { color: colors.red, fontSize: 11, fontWeight: '700' },
+  profileSectionLabel: { color: colors.muted, fontSize: 9, fontWeight: '900', letterSpacing: 1.1, marginTop: 5, marginLeft: 4 },
+  profileSettingsCard: { backgroundColor: colors.surface, borderRadius: 22, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
+  profileSettingRow: { minHeight: 64, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 13, paddingVertical: 10 },
+  profileSettingIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: colors.purpleSoft, alignItems: 'center', justifyContent: 'center' },
+  profileSettingIconText: { color: colors.purple, fontSize: 15, fontWeight: '900' },
+  profileSettingTitle: { color: colors.text, fontSize: 13.5, fontWeight: '800' },
+  profileSettingDetail: { color: colors.muted, fontSize: 10.3, lineHeight: 14.5, marginTop: 2 },
+  profileSettingChevron: { color: colors.muted, fontSize: 26, marginLeft: 4 },
+  profileSettingDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.line, marginLeft: 58 },
+  profileInlineWarning: { backgroundColor: '#FFF7E4', paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F1E0B5' },
+  profileInlineWarningText: { color: '#8E6B1D', fontSize: 10.3, lineHeight: 14 },
+  profileStatsCompact: { flexDirection: 'row', justifyContent: 'space-around', backgroundColor: colors.surface, borderRadius: 20, borderWidth: 1, borderColor: colors.line, paddingVertical: 14 },
+  profileStatsValue: { color: colors.text, fontSize: 19, fontWeight: '900', textAlign: 'center' },
+  profileStatsLabel: { color: colors.muted, fontSize: 9.5, textAlign: 'center', marginTop: 2 },
   entryHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, marginBottom: 2 },
   entryHeaderKicker: { color: colors.purple, fontSize: 9.5, fontWeight: '900', letterSpacing: 1.1 },
   entryHeaderTitle: { color: colors.text, fontSize: 28, fontWeight: '900', letterSpacing: -0.7, marginTop: 3 },

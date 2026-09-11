@@ -1,6 +1,6 @@
 {
   "name": "noura-health-tracker",
-  "version": "0.10.1",
+  "version": "0.12.0",
   "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
@@ -25,7 +25,11 @@
     "expo-secure-store": "^57.0.3",
     "react": "19.2.3",
     "react-native": "0.86.3",
-    "expo-camera": "~57.0.4"
+    "expo-camera": "~57.0.4",
+    "expo-image-picker": "~57.0.16",
+    "expo-file-system": "~57.0.6",
+    "expo-background-task": "~57.0.16",
+    "expo-task-manager": "~57.0.16"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",

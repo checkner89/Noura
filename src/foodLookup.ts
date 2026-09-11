@@ -79,7 +79,7 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = 10000): Promise<any
       signal: controller.signal,
       headers: {
         Accept: 'application/json',
-        'User-Agent': 'Noura/0.10 (food diary barcode lookup)',
+        'User-Agent': 'Noura/0.12 (food diary barcode lookup)',
       },
     });
     if (!response.ok) {

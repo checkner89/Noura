@@ -95,3 +95,9 @@ Typische Punkte:
 - Bei Apple-ID-Fehlern kann je nach Account ein app-spezifisches Passwort nötig sein.
 
 Die Noura-App verwendet derzeit keine kostenpflichtigen Apple-Capabilities wie Push Notifications, iCloud oder HealthKit. Kamera, Netzwerkzugriff und lokale Speicherung sind für diesen Testweg grundsätzlich passend.
+
+## Hinweis ab Noura 0.12
+
+Noura nutzt jetzt zusätzliche native Module für Profilbild, Background Tasks und Dateisystem. Nach dem Update musst du die IPA **neu über den GitHub-Workflow bauen**; ein reines JavaScript-Refresh reicht für diese Funktionen nicht.
+
+Die tägliche KI-Analyse ist auf iOS opportunistisch: iOS entscheidet den tatsächlichen Ausführungszeitpunkt. Wenn du Noura im App-Switcher aktiv beendest, werden Hintergrundaufgaben bis zum nächsten Start nicht ausgeführt.

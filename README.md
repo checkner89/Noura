@@ -1,100 +1,20 @@
-# Noura – Health & Food Diary MVP 0.10
+# Noura 0.12
 
-Noura ist ein React-Native/Expo-MVP für ein sehr einfaches Ernährungstagebuch mit Symptom-, Stuhlgang-, Körper- und Zyklustracking. Die UX orientiert sich an modernen Diary-Apps: wenige Taps, chronologische Einträge, ein zentraler Plus-Flow und kurze, klar dargestellte KI-Insights.
+Noura ist ein persönliches Ernährung-, Symptom-, Verdauungs- und Zyklustagebuch mit optionaler BYOK-KI.
 
-## Neu in 0.10
+## Neu in 0.12
 
-### Neuer Eintrag-Flow
+- kompakter neuer „+“-Dialog statt gequetschtem Fullscreen-Sheet
+- vereinfachter Startbildschirm mit persönlichem Tages-Score, wichtigster Erkenntnis und drei Schnellaktionen
+- Profilbild aus der iPhone-Fotomediathek; ohne Bild zeigt Noura automatisch die Initialen des Namens
+- im Profil sind die Inhalte des Einrichtungsassistenten als einzelne Einstellungen erreichbar: Name/Ziele, Tracking, Körper-Check-in, Zyklus sowie Datenschutz/Hinweise
+- eigene KI: Anbieter- und Modell-Dropdowns bleiben erhalten; mit API-Key kann Noura die Modellliste live vom Anbieter laden
+- optional tägliche automatische KI-Analyse über `expo-background-task`
+- optional automatischer Backup-Snapshot in den Documents-Bereich der App; iOS kann diesen im Gerätebackup in iCloud mitsichern
+- Profilbild wird dauerhaft in den Documents-Bereich kopiert
+- kostenloser Windows/iPhone-Sideload-Workflow über GitHub macOS Runner + AltStore bleibt enthalten
 
-Der große `+`-Flow wurde deutlich reduziert und neu gestaltet:
-
-- kompakter Bottom-Sheet statt übergroßer Liste
-- **„Noura einfach erzählen“** bleibt der schnellste Weg
-- darunter nur noch klare Direktaktionen für Essen, Gefühl, Auffälligkeit, Stuhlgang und Zyklus
-- Typografie und Abstände sind robuster bei größerer iOS-Schrift
-
-### Barcode-Scanner: Callback-Fix
-
-Der native iOS-Scanner hatte einen Race-Condition-Fehler: `launchScanner()` wurde intern zu früh als „Scan beendet“ behandelt. Dadurch konnte iOS einen Barcode sichtbar markieren, während Noura das eigentliche Scan-Event bereits ignorierte.
-
-0.10 hält die Scan-Session nun bis zum echten `onModernBarcodeScanned`-Event offen. Zusätzlich:
-
-- keine unnötige Symbologie-Filterung mehr
-- Barcode wird nach dem Scan sofort sichtbar bestätigt
-- automatischer Produkt-Lookup
-- besserer Lade-/Fehler-/Nicht-gefunden-Zustand
-- erneuter Scan und manuelle Barcode-Eingabe bleiben möglich
-- Open-Food-Facts-Lookup mit Timeout und UPC/EAN-Fallback
-
-### KI-Anbieter und Modelle als Dropdowns
-
-Unter **Profil → Meine KI** gibt es jetzt zwei getrennte Auswahlfelder:
-
-1. **KI-Anbieter**
-   - OpenAI
-   - Anthropic
-   - Google Gemini
-   - OpenAI-kompatibler Anbieter / eigener Gateway
-
-2. **Modell**
-   - durchsuchbares Dropdown
-   - mit API-Key lädt Noura die **vom jeweiligen Anbieter für genau diesen Account gemeldeten Modelle live**
-   - dadurch ist die Liste nicht auf eine hart codierte Auswahl begrenzt
-   - ohne API-Key gibt es eine aktuelle Vorauswahl sinnvoller Textmodelle
-
-Das ist robuster als eine statische „alle Modelle“-Liste, weil Anbieter Modelle laufend ergänzen, umbenennen oder entfernen und die Verfügbarkeit außerdem vom Account abhängen kann.
-
-### Fest auf dem iPhone installierbar
-
-Das Projekt ist für **EAS Internal Distribution** vorbereitet. Damit kann Noura als eigenständige App auf deinem iPhone installiert werden:
-
-- eigenes App-Icon im Homescreen
-- kein Expo Go nötig
-- kein laufender Windows-PC / Metro nötig
-- Updates über neue Preview-Builds
-
-Voraussetzung für iOS-Ad-hoc-Builds ist eine aktive Apple Developer Program Mitgliedschaft.
-
-Für Windows liegt `INSTALL_IOS.ps1` bei.
-
-## KI-Schnelleingabe
-
-Über **+ → Noura einfach erzählen** kann der Nutzer schreiben oder über das iOS-Tastaturmikrofon diktieren, z. B.:
-
-> Ich hatte gerade einen Latte und ein Croissant. Jetzt bin ich ziemlich aufgebläht und habe leichte Bauchschmerzen.
-
-Die verbundene KI erzeugt daraus nur einen **Entwurf**. Der Nutzer kann erkannte Mahlzeiten, Mengen, Symptome, Auffälligkeiten, Zyklus- oder Stuhlgangsdaten ändern oder abwählen. Erst nach der Bestätigung wird gespeichert.
-
-## Phase 2 – Diary First
-
-- Heute-Ansicht
-- chronologisches Tagebuch
-- zentrale Quick-Entry-Navigation
-- eigener Datentyp **Auffälligkeit**
-- Mahlzeiten, Symptome, Stuhlgang, Zyklus und freie Beobachtungen in einer Timeline
-- Barcode-Lookup über Open Food Facts
-- KI-Natural-Language-Capture mit Bestätigungs-/Editier-Flow
-
-## Phase 3 – Kontextanalyse
-
-Die lokale Analyse berücksichtigt:
-
-- Zeitfenster nach Mahlzeiten: **0–5 h, 5–10 h, 10–24 h, 24–48 h**
-- Symptomniveau nach geschätzter Zyklusphase
-- **Lebensmittel × Zyklusphase × Beschwerden**
-- freie Auffälligkeiten als Kontext
-- Zyklus als möglichen Confounder statt vorschneller Unverträglichkeits-Schlussfolgerung
-
-Die KI-Auswertung zeigt standardmäßig nur:
-
-- wichtigste Erkenntnis
-- Datenlage
-- bis zu drei kurze Beobachtungen
-- nächste Schritte
-
-Ausführliche Begründungen und Unsicherheiten sind optional aufklappbar.
-
-## Lokal mit Expo Go testen
+## Start auf Windows
 
 ```powershell
 cd C:\Users\Christoph\Downloads\NouraApp\NouraApp
@@ -102,24 +22,21 @@ npm.cmd install
 npx.cmd expo start -c
 ```
 
-## Fest aufs iPhone installieren
+## Wichtige iOS-Hinweise
 
-Einfach im Projektordner:
+### Automatische KI
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\INSTALL_IOS.ps1
-```
+iOS führt Background Tasks nicht minutengenau aus. Noura registriert einen täglichen Hintergrundtask mit einem Mindestintervall von 24 Stunden. iOS entscheidet anhand von Akku, Netzwerk und Nutzungsverhalten, wann er tatsächlich läuft. Wird die App im App-Switcher aktiv beendet, führt iOS den Task nicht aus, bis Noura wieder gestartet wurde.
 
-Oder manuell nach `INSTALL_IOS_WINDOWS.md`.
+Voraussetzungen in Noura:
+- eigene KI verbunden
+- Trackingdaten für KI-Analyse freigegeben
+- „Tägliche automatische KI-Analyse“ im Profil aktiviert
 
-## Datenhaltung im MVP
+### Backup
 
-- API-Key und KI-Einstellungen: `expo-secure-store`
-- Trackinghistorie: `@react-native-async-storage/async-storage`
-- Setup-Profil: `@react-native-async-storage/async-storage`
+Noura schreibt bei aktiviertem Backup nach Änderungen einen JSON-Snapshot nach `Documents/Noura/noura-backup.json`. API-Keys werden nicht in diese Datei geschrieben. Dateien im Documents-Bereich sind für das iOS-Gerätebackup vorgesehen, wenn iCloud Backup auf dem iPhone aktiviert ist. Das ist aktuell **kein CloudKit-Echtzeit-Sync zwischen mehreren Geräten**.
 
-AsyncStorage ist persistent, aber **nicht verschlüsselt**. Vor einem produktiven Release müssen Gesundheits- und Zyklusdaten verschlüsselt gespeichert werden. Datenexport/-löschung, Einwilligung, Datenschutz und regulatorische Anforderungen sind ebenfalls separat zu prüfen.
+## Eigene App auf dem iPhone ohne bezahlte Membership
 
-## Medizinisches Prinzip
-
-Noura strukturiert persönliche Tagebuchdaten und zeigt zeitliche/statistische Zusammenhänge. Die App diagnostiziert keine Allergie, Unverträglichkeit, hormonelle Störung oder andere Erkrankung. Zyklusphasen werden nur grob aus dokumentierten Blutungstagen geschätzt; sie sind kein Ovulationsnachweis.
+Siehe `INSTALL_FREE_IOS_WINDOWS.md`. Der GitHub-Workflow baut eine unsignierte IPA auf einem macOS-Runner. AltStore/AltServer signiert sie mit deinem kostenlosen Apple Account. Bei kostenloser Apple-Signierung muss die App regelmäßig erneuert werden.

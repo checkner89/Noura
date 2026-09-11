@@ -2,20 +2,24 @@
   "expo": {
     "name": "Noura",
     "slug": "noura-health-tracker",
-    "version": "0.10.1",
+    "version": "0.12.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "de.noura.healthtracker",
       "infoPlist": {
-        "NSCameraUsageDescription": "Noura nutzt die Kamera ausschließlich zum Scannen von Barcodes auf Lebensmittelverpackungen."
+        "NSCameraUsageDescription": "Noura nutzt die Kamera ausschließlich zum Scannen von Barcodes auf Lebensmittelverpackungen.",
+        "NSPhotoLibraryUsageDescription": "Noura nutzt deine Fotomediathek nur, wenn du ein Profilbild auswählst."
       },
-      "buildNumber": "3"
+      "buildNumber": "4",
+      "config": {
+        "usesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "de.noura.healthtracker",
-      "versionCode": 3
+      "versionCode": 4
     },
     "plugins": [
       [
@@ -24,7 +28,16 @@
           "cameraPermission": "Noura benötigt Kamerazugriff, um Barcodes von Lebensmitteln zu scannen.",
           "barcodeScannerEnabled": true
         }
-      ]
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Noura nutzt deine Fotomediathek nur, wenn du ein Profilbild auswählst.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      "expo-secure-store"
     ],
     "scheme": "noura"
   }
