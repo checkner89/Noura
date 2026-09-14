@@ -79,7 +79,7 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = 10000): Promise<any
       signal: controller.signal,
       headers: {
         Accept: 'application/json',
-        'User-Agent': 'Noura/0.12 (food diary barcode lookup)',
+        'User-Agent': 'Noura/0.14 (food diary barcode lookup)',
       },
     });
     if (!response.ok) {
@@ -183,3 +183,62 @@ export async function lookupFoodByBarcode(barcode: string): Promise<BarcodeFoodP
   if (lastNetworkError) throw lastNetworkError;
   return null;
 }
+
+export type FoodSearchResult = BarcodeFoodProduct & { source: 'openfoodfacts' | 'catalog' };
+
+const COMMON_FOODS: Array<{name:string;aliases:string[];kcal?:number;protein?:number;carbs?:number;fat?:number;servingSize?:string}> = [
+  {name:'Banane',aliases:['banana'],kcal:89,protein:1.1,carbs:22.8,fat:0.3,servingSize:'1 Stück'},
+  {name:'Apfel',aliases:['apple'],kcal:52,protein:0.3,carbs:13.8,fat:0.2,servingSize:'1 Stück'},
+  {name:'Haferflocken',aliases:['oats','porridge'],kcal:372,protein:13.5,carbs:58.7,fat:7,servingSize:'60 g'},
+  {name:'Naturjoghurt',aliases:['joghurt','yogurt'],kcal:61,protein:3.5,carbs:4.7,fat:3.3,servingSize:'150 g'},
+  {name:'Skyr',aliases:['skyr natur'],kcal:63,protein:11,carbs:4,fat:0.2,servingSize:'150 g'},
+  {name:'Kuhmilch 3,5 %',aliases:['milch','vollmilch'],kcal:64,protein:3.3,carbs:4.8,fat:3.5,servingSize:'200 ml'},
+  {name:'Haferdrink',aliases:['hafermilch','oat milk'],kcal:46,protein:1,carbs:7.7,fat:1.5,servingSize:'200 ml'},
+  {name:'Reis gekocht',aliases:['reis','rice'],kcal:130,protein:2.7,carbs:28,fat:0.3,servingSize:'200 g'},
+  {name:'Pasta gekocht',aliases:['nudeln','spaghetti','pasta'],kcal:157,protein:5.8,carbs:30.9,fat:0.9,servingSize:'250 g'},
+  {name:'Vollkornbrot',aliases:['brot','vollkorn'],kcal:247,protein:8.5,carbs:41,fat:3.4,servingSize:'1 Scheibe'},
+  {name:'Ei gekocht',aliases:['ei','egg'],kcal:155,protein:13,carbs:1.1,fat:11,servingSize:'1 Stück'},
+  {name:'Hähnchenbrust',aliases:['hähnchen','chicken'],kcal:165,protein:31,carbs:0,fat:3.6,servingSize:'150 g'},
+  {name:'Lachs',aliases:['salmon'],kcal:208,protein:20,carbs:0,fat:13,servingSize:'150 g'},
+  {name:'Kartoffeln gekocht',aliases:['kartoffel','potato'],kcal:87,protein:1.9,carbs:20.1,fat:0.1,servingSize:'250 g'},
+  {name:'Kaffee schwarz',aliases:['kaffee','coffee'],kcal:2,protein:0.3,carbs:0,fat:0,servingSize:'1 Tasse'},
+  {name:'Latte Macchiato',aliases:['latte','milchkaffee'],kcal:45,protein:2.5,carbs:4.5,fat:2.2,servingSize:'250 ml'},
+];
+
+function searchCatalog(query:string,limit:number):FoodSearchResult[]{
+  const q=query.trim().toLowerCase(); if(q.length<2)return [];
+  return COMMON_FOODS.map((x,index)=>{const hay=[x.name,...x.aliases].join(' ').toLowerCase(); const pos=hay.indexOf(q); return {x,index,score:pos===0?0:pos>=0?1:99};}).filter(r=>r.score<99).sort((a,b)=>a.score-b.score||a.index-b.index).slice(0,limit).map(({x,index})=>({barcode:`catalog-${index}`,name:x.name,servingSize:x.servingSize,allergens:[],nutritionPer100g:{kcal:x.kcal,protein:x.protein,carbs:x.carbs,fat:x.fat},source:'catalog'}));
+}
+
+
+export async function searchFoodProducts(query: string, limit = 12): Promise<FoodSearchResult[]> {
+  const clean = query.trim();
+  if (clean.length < 2) return [];
+  const local = searchCatalog(clean, Math.min(6, limit));
+  const fields = [
+    'code','product_name','product_name_de','product_name_en','abbreviated_product_name','generic_name','generic_name_de',
+    'brands','quantity','serving_size','image_front_small_url','image_front_url','ingredients_text','ingredients_text_de','allergens_tags','nutriments',
+  ].join(',');
+  try {
+    const url = `https://world.openfoodfacts.org/cgi/search.pl?action=process&search_simple=1&json=1&page_size=${Math.max(1, Math.min(30, limit))}&fields=${encodeURIComponent(fields)}&search_terms=${encodeURIComponent(clean)}`;
+    const data = await fetchJsonWithTimeout(url, 12000);
+    const products = Array.isArray(data?.products) ? data.products : [];
+    const mapped: FoodSearchResult[] = [...local];
+    const seen = new Set(local.map(x=>`${x.name.toLowerCase()}|${(x.brand||'').toLowerCase()}`));
+    for (const raw of products) {
+      const code = String(raw?.code || '').trim();
+      const product = mapProduct(raw, code || `search-${mapped.length}`);
+      if (!product) continue;
+      const key = `${product.name.toLowerCase()}|${(product.brand || '').toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      mapped.push({ ...product, source: 'openfoodfacts' });
+      if (mapped.length >= limit) break;
+    }
+    return mapped.slice(0,limit);
+  } catch (error) {
+    if (local.length) return local;
+    throw error;
+  }
+}
+

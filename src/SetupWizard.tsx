@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   SafeAreaView,
+  Image,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -114,7 +115,7 @@ export default function SetupWizard({ initialProfile, editing = false, startStep
   const bodyTrackingEnabled = profile.tracking.symptoms;
   const canContinue = useMemo(() => {
     if (step === 1) return profile.goals.length > 0;
-    if (step === 2) return profile.tracking.meals || profile.tracking.symptoms || profile.tracking.bowel || profile.tracking.cycle;
+    if (step === 2) return profile.tracking.meals || profile.tracking.symptoms || profile.tracking.bowel || profile.tracking.cycle || profile.tracking.medications;
     if (step === 3 && bodyTrackingEnabled) return profile.symptomsToTrack.length > 0 || profile.tracking.temperature || profile.tracking.energy || profile.tracking.stress;
     if (step === 5) return understandsLocal && understandsMedical;
     return true;
@@ -159,7 +160,7 @@ export default function SetupWizard({ initialProfile, editing = false, startStep
     if (step === 0) {
       return (
         <View style={styles.heroWrap}>
-          <View style={styles.logo}><Text style={styles.logoText}>N</Text></View>
+          <Image source={require('../assets/icon.png')} style={styles.logoImage} />
           <Text style={styles.brand}>Noura</Text>
           <Text style={styles.heroTitle}>Lerne deine Ernährung und deinen Körper besser kennen.</Text>
           <Text style={styles.heroCopy}>Noura verbindet deine eigenen Tagebuchdaten zu nachvollziehbaren Mustern – ohne aus Korrelationen vorschnell Diagnosen zu machen.</Text>
@@ -218,7 +219,10 @@ export default function SetupWizard({ initialProfile, editing = false, startStep
             <ToggleRow title="Stuhlgang" text="Bristol-Skala und Dringlichkeit dokumentieren." value={profile.tracking.bowel} onChange={bowel => setProfile(current => ({ ...current, tracking: { ...current.tracking, bowel } }))} />
             <View style={styles.divider} />
             <ToggleRow title="Zyklus" text="Periode, Krämpfe, Cravings, Stimmung und optionale Basaltemperatur." value={profile.tracking.cycle} onChange={cycle => setProfile(current => ({ ...current, goals: cycle && !current.goals.includes('cycle') ? [...current.goals, 'cycle'] : current.goals, tracking: { ...current.tracking, cycle } }))} />
+            <View style={styles.divider} />
+            <ToggleRow title="Medikamente & Supplements" text="Optional als möglicher Kontextfaktor für Beschwerden." value={profile.tracking.medications} onChange={medications => setProfile(current => ({ ...current, tracking: { ...current.tracking, medications } }))} />
           </View>
+          {profile.tracking.cycle && <View style={styles.panel}><Text style={styles.sectionLabel}>Zyklus-Grundlagen</Text><Text style={styles.inputLabel}>Erster Tag der letzten Periode</Text><TextInput value={profile.cyclePreferences.lastPeriodStart ? profile.cyclePreferences.lastPeriodStart.slice(0,10) : ''} onChangeText={(v:string) => setProfile(c => ({...c, cyclePreferences:{...c.cyclePreferences,lastPeriodStart:/^\d{4}-\d{2}-\d{2}$/.test(v)?`${v}T12:00:00.000Z`:v||undefined}}))} placeholder="JJJJ-MM-TT" placeholderTextColor="#98A19B" style={styles.input}/><View style={{flexDirection:'row',gap:10}}><View style={{flex:1}}><Text style={styles.inputLabel}>Zykluslänge</Text><TextInput value={String(profile.cyclePreferences.averageCycleLength)} onChangeText={(v:string)=>setProfile(c=>({...c,cyclePreferences:{...c.cyclePreferences,averageCycleLength:Math.max(18,Math.min(60,Number(v)||28))}}))} keyboardType="number-pad" style={styles.input}/></View><View style={{flex:1}}><Text style={styles.inputLabel}>Periodenlänge</Text><TextInput value={String(profile.cyclePreferences.periodLength)} onChangeText={(v:string)=>setProfile(c=>({...c,cyclePreferences:{...c.cyclePreferences,periodLength:Math.max(1,Math.min(14,Number(v)||5))}}))} keyboardType="number-pad" style={styles.input}/></View></View></View>}
           <View style={styles.tipCard}><Text style={styles.tipIcon}>i</Text><Text style={styles.tipText}>Für Lebensmittel-Signale sind Mahlzeiten plus zeitnahe Körper-Check-ins besonders hilfreich.</Text></View>
         </>
       );
@@ -256,6 +260,14 @@ export default function SetupWizard({ initialProfile, editing = false, startStep
             <ToggleRow title="Energielevel" text="Subjektiver Wert von 0 bis 10." value={profile.tracking.energy} onChange={energy => setProfile(current => ({ ...current, tracking: { ...current.tracking, energy } }))} />
             <View style={styles.divider} />
             <ToggleRow title="Stress" text="Subjektiver Wert von 0 bis 10." value={profile.tracking.stress} onChange={stress => setProfile(current => ({ ...current, tracking: { ...current.tracking, stress } }))} />
+            <View style={styles.divider} />
+            <ToggleRow title="Gewicht" text="Manuell oder aus Apple Health importieren." value={profile.tracking.weight} onChange={weight => setProfile(current => ({ ...current, tracking: { ...current.tracking, weight } }))} />
+            <View style={styles.divider} />
+            <ToggleRow title="Wasser" text="Optional Trinkmenge als Kontext dokumentieren." value={profile.tracking.water} onChange={water => setProfile(current => ({ ...current, tracking: { ...current.tracking, water } }))} />
+            <View style={styles.divider} />
+            <ToggleRow title="Schlaf" text="Schlafdauer als möglicher Einflussfaktor." value={profile.tracking.sleep} onChange={sleep => setProfile(current => ({ ...current, tracking: { ...current.tracking, sleep } }))} />
+            <View style={styles.divider} />
+            <ToggleRow title="Bewegung" text="Schritte und Aktivität als Kontextfaktor." value={profile.tracking.movement} onChange={movement => setProfile(current => ({ ...current, tracking: { ...current.tracking, movement } }))} />
           </View>
         </>
       );
@@ -296,7 +308,7 @@ export default function SetupWizard({ initialProfile, editing = false, startStep
 
         <TouchableOpacity style={[styles.legalCard, understandsLocal && styles.legalCardChecked]} onPress={() => setUnderstandsLocal(v => !v)}>
           <View style={[styles.checkSquare, understandsLocal && styles.checkSquareSelected]}>{understandsLocal && <Text style={styles.checkMark}>✓</Text>}</View>
-          <View style={{ flex: 1 }}><Text style={styles.legalTitle}>Lokale Speicherung im MVP verstanden</Text><Text style={styles.legalText}>Trackingdaten bleiben in dieser Testversion grundsätzlich auf dem Gerät. Der aktuelle Prototyp nutzt dafür noch keinen verschlüsselten Gesundheitsdatenspeicher.</Text></View>
+          <View style={{ flex: 1 }}><Text style={styles.legalTitle}>Lokale, verschlüsselte Speicherung verstanden</Text><Text style={styles.legalText}>Trackingdaten werden lokal verschlüsselt gespeichert. Externe KI erhält sie nur, wenn du die Datenfreigabe ausdrücklich aktivierst.</Text></View>
         </TouchableOpacity>
 
         <TouchableOpacity style={[styles.legalCard, understandsMedical && styles.legalCardChecked]} onPress={() => setUnderstandsMedical(v => !v)}>
@@ -307,7 +319,7 @@ export default function SetupWizard({ initialProfile, editing = false, startStep
         <View style={styles.summaryCard}>
           <Text style={styles.summaryKicker}>DEINE EINRICHTUNG</Text>
           <Text style={styles.summaryTitle}>{profile.displayName ? `Bereit für dich, ${profile.displayName.trim()}.` : 'Noura ist bereit.'}</Text>
-          <Text style={styles.summaryText}>{profile.goals.length} Ziele · {[profile.tracking.meals && 'Mahlzeiten', profile.tracking.symptoms && 'Körper-Check-ins', profile.tracking.bowel && 'Stuhlgang', profile.tracking.cycle && 'Zyklus'].filter(Boolean).join(' · ') || 'Tracking individuell reduziert'}</Text>
+          <Text style={styles.summaryText}>{profile.goals.length} Ziele · {[profile.tracking.meals && 'Mahlzeiten', profile.tracking.symptoms && 'Körper-Check-ins', profile.tracking.bowel && 'Stuhlgang', profile.tracking.cycle && 'Zyklus', profile.tracking.medications && 'Medikamente'].filter(Boolean).join(' · ') || 'Tracking individuell reduziert'}</Text>
         </View>
       </>
     );
@@ -348,6 +360,7 @@ const styles = StyleSheet.create({
   closeText: { color: colors.green, fontSize: 12, fontWeight: '800' },
   content: { paddingHorizontal: 20, paddingTop: 18, paddingBottom: 30, gap: 12 },
   heroWrap: { alignItems: 'center', paddingTop: 22 },
+  logoImage: { width: 74, height: 74, borderRadius: 22, marginBottom: 8 },
   logo: { width: 72, height: 72, borderRadius: 24, backgroundColor: colors.green, alignItems: 'center', justifyContent: 'center' },
   logoText: { color: '#FFF', fontWeight: '900', fontSize: 35, letterSpacing: -1.5 },
   brand: { color: colors.green, fontWeight: '900', fontSize: 18, marginTop: 14 },

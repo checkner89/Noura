@@ -1,11 +1,13 @@
 import React from 'react';
 import { Modal, Platform, SafeAreaView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-export type ManualEntryMode = 'Essen' | 'Symptome' | 'Auffälligkeit' | 'Stuhlgang' | 'Zyklus';
+export type ManualEntryMode = 'Essen' | 'Symptome' | 'Auffälligkeit' | 'Stuhlgang' | 'Zyklus' | 'Medikamente' | 'Körperdaten';
 
 type Props = {
   visible: boolean;
   cycleEnabled: boolean;
+  medicationsEnabled?: boolean;
+  bodyDataEnabled?: boolean;
   onClose: () => void;
   onAI: () => void;
   onManual: (mode: ManualEntryMode) => void;
@@ -14,13 +16,15 @@ type Props = {
 const items: Array<{ mode: ManualEntryMode; icon: string; title: string; subtitle: string; tint: string; iconColor: string }> = [
   { mode: 'Essen', icon: '🍽', title: 'Essen', subtitle: 'Mahlzeit oder Getränk', tint: '#EAF6EE', iconColor: '#3E7F56' },
   { mode: 'Symptome', icon: '◌', title: 'Gefühl', subtitle: 'Symptome & Befinden', tint: '#FFF0E9', iconColor: '#B76A43' },
-  { mode: 'Auffälligkeit', icon: '!', title: 'Auffällig', subtitle: 'Kurz festhalten', tint: '#FFF6DC', iconColor: '#9A7825' },
+  { mode: 'Auffälligkeit', icon: '!', title: 'Beobachtung', subtitle: 'Etwas kurz merken', tint: '#FFF6DC', iconColor: '#9A7825' },
   { mode: 'Stuhlgang', icon: '◎', title: 'Stuhlgang', subtitle: 'Bristol & Dringlichkeit', tint: '#EAF3FA', iconColor: '#4C7695' },
   { mode: 'Zyklus', icon: '◐', title: 'Zyklus', subtitle: 'Periode & Körpergefühl', tint: '#F4EBF8', iconColor: '#75558F' },
+  { mode: 'Medikamente', icon: '✚', title: 'Medikamente', subtitle: 'Auch Supplements', tint: '#EEF3FA', iconColor: '#557590' },
+  { mode: 'Körperdaten', icon: '♡', title: 'Körperdaten', subtitle: 'Gewicht, Schlaf & mehr', tint: '#EEF7F0', iconColor: '#4D7C58' },
 ];
 
-export default function AddEntrySheet({ visible, cycleEnabled, onClose, onAI, onManual }: Props) {
-  const visibleItems = items.filter(item => cycleEnabled || item.mode !== 'Zyklus');
+export default function AddEntrySheet({ visible, cycleEnabled, medicationsEnabled = false, bodyDataEnabled = false, onClose, onAI, onManual }: Props) {
+  const visibleItems = items.filter(item => (cycleEnabled || item.mode !== 'Zyklus') && (medicationsEnabled || item.mode !== 'Medikamente') && (bodyDataEnabled || item.mode !== 'Körperdaten'));
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
       <View style={styles.backdrop}>
@@ -35,7 +39,7 @@ export default function AddEntrySheet({ visible, cycleEnabled, onClose, onAI, on
             <TouchableOpacity accessibilityLabel="Schließen" style={styles.close} onPress={onClose}><Text style={styles.closeText}>×</Text></TouchableOpacity>
           </View>
 
-          <TouchableOpacity style={styles.aiCard} onPress={onAI} activeOpacity={0.88}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Noura erzählen" accessibilityHint="Erstellt aus Sprache oder Text einen prüfbaren Entwurf" style={styles.aiCard} onPress={onAI} activeOpacity={0.88}>
             <View style={styles.aiIcon}><Text style={styles.aiIconText}>✦</Text></View>
             <View style={styles.aiCopyWrap}>
               <Text style={styles.aiTitle}>Noura erzählen</Text>
@@ -48,7 +52,7 @@ export default function AddEntrySheet({ visible, cycleEnabled, onClose, onAI, on
 
           <View style={styles.grid}>
             {visibleItems.map(item => (
-              <TouchableOpacity key={item.mode} style={styles.item} onPress={() => onManual(item.mode)} activeOpacity={0.8}>
+              <TouchableOpacity key={item.mode} accessibilityRole="button" accessibilityLabel={`${item.title}: ${item.subtitle}`} style={styles.item} onPress={() => onManual(item.mode)} activeOpacity={0.8}>
                 <View style={[styles.itemIcon, { backgroundColor: item.tint }]}><Text style={[styles.itemIconText, { color: item.iconColor }]}>{item.icon}</Text></View>
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.itemTitle} numberOfLines={1} maxFontSizeMultiplier={1.1}>{item.title}</Text>

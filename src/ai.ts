@@ -1,6 +1,9 @@
 import * as SecureStore from 'expo-secure-store';
 import { buildAISummary } from './analysis';
-import { CycleFlow, CycleMood, HealthStore, MealType, ObservationCategory } from './types';
+import { CycleFlow, CycleMood, HealthStore, MealType, MedicationKind, ObservationCategory } from './types';
+import { CyclePreferences } from './onboarding';
+import { recordAIUsage } from './aiUsage';
+import { safetyPromptSummary } from './medicalSafety';
 
 export type AIProvider = 'openai' | 'anthropic' | 'gemini' | 'compatible';
 export type AIDataScope = 'summary' | 'detailed';
@@ -27,12 +30,12 @@ export type AIHealthInsight = {
 export type AIQuickFood = { name: string; amount?: string };
 export type AIQuickMealDraft = { mealType: MealType; foods: AIQuickFood[]; note?: string };
 export type AIQuickSymptomDraft = {
-  pain: number;
-  bloating: number;
-  nausea: number;
-  heartburn: number;
-  energy: number;
-  stress: number;
+  pain?: number;
+  bloating?: number;
+  nausea?: number;
+  heartburn?: number;
+  energy?: number;
+  stress?: number;
   temperature?: number;
   note?: string;
 };
@@ -40,14 +43,15 @@ export type AIQuickBowelDraft = { bristolType: number; urgency: number; note?: s
 export type AIQuickCycleDraft = {
   bleeding: boolean;
   flow?: CycleFlow;
-  cramps: number;
-  cravings: number;
-  headache: number;
-  breastTenderness: number;
-  mood: CycleMood;
+  cramps?: number;
+  cravings?: number;
+  headache?: number;
+  breastTenderness?: number;
+  mood?: CycleMood;
   basalTemperature?: number;
   note?: string;
 };
+export type AIQuickMedicationDraft = { kind: MedicationKind; name: string; dose?: string; note?: string };
 export type AIQuickObservationDraft = {
   text: string;
   category: ObservationCategory;
@@ -63,6 +67,7 @@ export type AIQuickDraft = {
   bowel?: AIQuickBowelDraft;
   cycle?: AIQuickCycleDraft;
   observation?: AIQuickObservationDraft;
+  medications?: AIQuickMedicationDraft[];
   needsClarification: string[];
 };
 
@@ -210,12 +215,13 @@ Der Nutzer erzählt in natürlicher Sprache, was er gerade oder kürzlich gegess
 Wichtig:
 - Erfinde keine Lebensmittel, Mengen, Symptome, Messwerte oder Diagnosen.
 - Wenn keine Menge genannt ist, amount weglassen.
-- Intensitäten nur ableiten, wenn sprachlich sinnvoll. Nutze 0-10. "leicht"≈2-3, "mittel"≈5, "stark"≈7-8, "sehr stark"≈9. Bei fehlender Angabe 0 und als Rückfrage erwähnen, falls relevant.
+- Intensitäten nur ableiten, wenn sprachlich sinnvoll. Nutze 0-10. "leicht"≈2-3, "mittel"≈5, "stark"≈7-8, "sehr stark"≈9. Nicht genannte Werte vollständig weglassen.
 - mealType anhand Tageszeit/Benennung vorsichtig wählen; bei Unsicherheit Snack.
-- Energie/Stress ohne Angabe neutral auf 5 setzen.
+- Energie, Stress, Temperatur und Zykluswerte niemals mit Neutral-/Standardwerten auffüllen. Nur angeben, wenn der Nutzer sie wirklich genannt oder eindeutig beschrieben hat.
 - Stuhlgang nur anlegen, wenn ausdrücklich erwähnt und eine Bristol-Zuordnung plausibel ist. Sonst nicht raten.
 - Zyklus nur anlegen, wenn Periode/Blutung oder andere explizite Zyklusangaben genannt werden.
 - Eine observation anlegen, wenn der Nutzer eine Auffälligkeit, zeitliche Beziehung oder freie Beobachtung beschreibt.
+- Medikamente oder Supplements nur anlegen, wenn ausdrücklich genannt. Medikamentenname und Dosis niemals ergänzen oder erraten.
 - Keine medizinische Interpretation. Nur strukturieren.
 - Antworte auf Deutsch.
 
@@ -224,16 +230,17 @@ Antworte ausschließlich als valides JSON ohne Markdown:
   "headline": "Entwurf erkannt",
   "understood": "ein kurzer Satz, was verstanden wurde",
   "meal": {"mealType":"Frühstück|Mittagessen|Abendessen|Snack","foods":[{"name":"...","amount":"optional"}],"note":"optional"},
-  "symptom": {"pain":0,"bloating":0,"nausea":0,"heartburn":0,"energy":5,"stress":5,"temperature":36.6,"note":"optional"},
+  "symptom": {"pain":"optional 0-10","bloating":"optional 0-10","nausea":"optional 0-10","heartburn":"optional 0-10","energy":"optional 0-10","stress":"optional 0-10","temperature":"optional Zahl","note":"optional"},
   "bowel": {"bristolType":4,"urgency":1,"note":"optional"},
-  "cycle": {"bleeding":false,"flow":"spotting|light|medium|heavy","cramps":0,"cravings":0,"headache":0,"breastTenderness":0,"mood":"low|neutral|good","basalTemperature":36.5,"note":"optional"},
+  "cycle": {"bleeding":false,"flow":"optional spotting|light|medium|heavy","cramps":"optional 0-10","cravings":"optional 0-10","headache":"optional 0-10","breastTenderness":"optional 0-10","mood":"optional low|neutral|good","basalTemperature":"optional Zahl","note":"optional"},
   "observation": {"text":"...","category":"food|symptom|cycle|body|general","severity":0,"tags":["..."]},
+  "medications": [{"kind":"medication|supplement","name":"...","dose":"optional","note":"optional"}],
   "needsClarification": ["kurze Rückfragen, nur wenn wirklich nötig"]
 }
 Lasse ganze Objekte weg, wenn sie aus der Aussage nicht hervorgehen.`;
 
-function buildUserPrompt(store: HealthStore, scope: AIDataScope): string {
-  const summary = buildAISummary(store);
+function buildUserPrompt(store: HealthStore, scope: AIDataScope, cyclePreferences?: CyclePreferences): string {
+  const summary = buildAISummary(store, cyclePreferences);
   const context: Record<string, unknown> = { summary };
   if (scope === 'detailed') {
     context.recentRecords = {
@@ -242,11 +249,29 @@ function buildUserPrompt(store: HealthStore, scope: AIDataScope): string {
       bowel: store.bowel.slice(0, 40),
       cycle: store.cycle.slice(0, 60),
       observations: store.observations.slice(0, 40),
+      medications: store.medications.slice(0, 40),
+      appleHealth: store.healthMetrics.slice(0, 60),
     };
   }
-  return `Datenschutz-Modus: ${scope === 'summary' ? 'nur aggregierte Zusammenfassung' : 'Zusammenfassung plus begrenzte Detail-Timeline'}\n\nTrackingdaten:\n${JSON.stringify(context, null, 2)}\n\nLeite daraus nur vorsichtige, nachvollziehbare Muster ab.`;
+  const safety = safetyPromptSummary(store);
+  return `Datenschutz-Modus: ${scope === 'summary' ? 'nur aggregierte Zusammenfassung' : 'Zusammenfassung plus begrenzte Detail-Timeline'}\n\nTrackingdaten:\n${JSON.stringify(context, null, 2)}${safety ? `\n\nLokale Sicherheitsmarker (nicht diagnostisch):\n${safety}` : ''}\n\nLeite daraus nur vorsichtige, nachvollziehbare Muster ab.`;
 }
 
+export function getAITransmissionSummary(store: HealthStore, scope: AIDataScope, cyclePreferences?: CyclePreferences) {
+  const prompt = buildUserPrompt(store, scope, cyclePreferences);
+  const dates = [
+    ...store.meals.map(x=>x.createdAt), ...store.symptoms.map(x=>x.createdAt), ...store.bowel.map(x=>x.createdAt),
+    ...store.cycle.map(x=>x.createdAt), ...store.observations.map(x=>x.createdAt), ...store.medications.map(x=>x.createdAt), ...store.healthMetrics.map(x=>x.createdAt),
+  ].map(x=>new Date(x).getTime()).filter(Number.isFinite);
+  const daysIncluded = dates.length ? Math.max(1, Math.ceil((Date.now()-Math.min(...dates))/86400000)) : 0;
+  return {
+    scope,
+    payloadCharacters: prompt.length,
+    approximateKilobytes: Math.round((new TextEncoder().encode(prompt).length/1024)*10)/10,
+    daysIncluded,
+    categories: scope === 'summary' ? ['Aggregierte Muster & Kennzahlen'] : ['Aggregierte Muster & Kennzahlen','bis zu 40 Mahlzeiten','bis zu 60 Körper-Check-ins','bis zu 40 Stuhlgang-Einträge','bis zu 60 Zyklus-Einträge','bis zu 40 Beobachtungen','bis zu 40 Medikamente/Supplements','bis zu 60 Health-Werte'],
+  };
+}
 
 function titleFromModelId(id: string) {
   return id
@@ -493,23 +518,28 @@ function parseQuickDraft(text: string): AIQuickDraft {
     };
   }
   if (parsed?.symptom) {
-    result.symptom = {
-      pain: clamp(parsed.symptom.pain), bloating: clamp(parsed.symptom.bloating), nausea: clamp(parsed.symptom.nausea), heartburn: clamp(parsed.symptom.heartburn),
-      energy: clamp(parsed.symptom.energy, 5), stress: clamp(parsed.symptom.stress, 5), temperature: optionalNumber(parsed.symptom.temperature, 34, 42),
-      note: parsed.symptom.note ? String(parsed.symptom.note) : undefined,
-    };
+    const symptom: AIQuickSymptomDraft = { note: parsed.symptom.note ? String(parsed.symptom.note) : undefined };
+    for (const key of ['pain','bloating','nausea','heartburn','energy','stress'] as const) {
+      if (parsed.symptom[key] !== undefined && parsed.symptom[key] !== null && parsed.symptom[key] !== '') symptom[key] = clamp(parsed.symptom[key]);
+    }
+    symptom.temperature = optionalNumber(parsed.symptom.temperature, 34, 42);
+    if (Object.values(symptom).some(v => v !== undefined)) result.symptom = symptom;
   }
   if (parsed?.bowel && Number.isFinite(Number(parsed.bowel.bristolType))) {
     result.bowel = { bristolType: clamp(parsed.bowel.bristolType, 4, 1, 7), urgency: clamp(parsed.bowel.urgency, 1, 0, 3), note: parsed.bowel.note ? String(parsed.bowel.note) : undefined };
   }
   if (parsed?.cycle) {
-    result.cycle = {
+    const cycleDraft: AIQuickCycleDraft = {
       bleeding: !!parsed.cycle.bleeding,
       flow: flow.includes(parsed.cycle.flow) ? parsed.cycle.flow : undefined,
-      cramps: clamp(parsed.cycle.cramps), cravings: clamp(parsed.cycle.cravings), headache: clamp(parsed.cycle.headache), breastTenderness: clamp(parsed.cycle.breastTenderness),
-      mood: mood.includes(parsed.cycle.mood) ? parsed.cycle.mood : 'neutral', basalTemperature: optionalNumber(parsed.cycle.basalTemperature, 34, 42),
+      mood: mood.includes(parsed.cycle.mood) ? parsed.cycle.mood : undefined,
+      basalTemperature: optionalNumber(parsed.cycle.basalTemperature, 34, 42),
       note: parsed.cycle.note ? String(parsed.cycle.note) : undefined,
     };
+    for (const key of ['cramps','cravings','headache','breastTenderness'] as const) {
+      if (parsed.cycle[key] !== undefined && parsed.cycle[key] !== null && parsed.cycle[key] !== '') cycleDraft[key] = clamp(parsed.cycle[key]);
+    }
+    result.cycle = cycleDraft;
   }
   if (parsed?.observation?.text) {
     result.observation = {
@@ -519,19 +549,87 @@ function parseQuickDraft(text: string): AIQuickDraft {
       tags: Array.isArray(parsed.observation.tags) ? parsed.observation.tags.slice(0, 6).map(String).filter(Boolean) : undefined,
     };
   }
+  if (Array.isArray(parsed?.medications)) {
+    result.medications = parsed.medications.slice(0, 6).map((item: any) => ({
+      kind: item?.kind === 'supplement' ? 'supplement' as const : 'medication' as const,
+      name: String(item?.name || '').trim(),
+      dose: item?.dose ? String(item.dose).trim() : undefined,
+      note: item?.note ? String(item.note).trim() : undefined,
+    })).filter((item: AIQuickMedicationDraft) => !!item.name);
+    if (!result.medications.length) delete result.medications;
+  }
   return result;
 }
 
-export async function generateHealthInsight(config: AIConfig, store: HealthStore, scope: AIDataScope): Promise<AIHealthInsight> {
-  return parseInsight(await callProvider(config, buildUserPrompt(store, scope), HEALTH_SYSTEM_PROMPT));
+
+const PHOTO_MEAL_SYSTEM_PROMPT = `Du bist die Foto-Eingabehilfe von Noura. Analysiere ausschließlich sichtbar erkennbare Lebensmittel und Getränke im Bild.
+- Erfinde nichts, das nicht sichtbar oder plausibel erkennbar ist.
+- Mengen nur als vorsichtige, grobe Schätzung angeben und mit "ca." kennzeichnen.
+- Keine Kalorien oder Diagnosen schätzen.
+- Bei Unsicherheit das Lebensmittel allgemein benennen (z. B. "Nudeln mit Sauce") statt Zutaten zu erfinden.
+- Antworte ausschließlich als valides JSON im Format des Noura-Schnellentwurfs mit headline, understood, meal und needsClarification.
+- mealType anhand Tageszeit nur vorsichtig wählen.
+- meal.foods ist eine Liste aus {name, amount?}.`;
+
+async function callVisionProvider(config: AIConfig, base64: string, mimeType: string, prompt: string): Promise<string> {
+  if (!config.apiKey.trim()) throw new Error('API-Key fehlt.');
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  if (config.provider === 'openai') {
+    const base = trimSlash(config.baseUrl || PROVIDER_META.openai.defaultBaseUrl!);
+    const data = await postJson(`${base}/responses`, { Authorization: `Bearer ${config.apiKey}` }, {
+      model: config.model, instructions: PHOTO_MEAL_SYSTEM_PROMPT,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }, { type: 'input_image', image_url: dataUrl }] }],
+      max_output_tokens: 900,
+    });
+    if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
+    return (data?.output || []).flatMap((item: any) => item?.content || []).map((part: any) => part?.text).filter(Boolean).join('\n').trim();
+  }
+  if (config.provider === 'anthropic') {
+    const base = trimSlash(config.baseUrl || PROVIDER_META.anthropic.defaultBaseUrl!);
+    const data = await postJson(`${base}/messages`, { 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, {
+      model: config.model, max_tokens: 900, system: PHOTO_MEAL_SYSTEM_PROMPT, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } }, { type: 'text', text: prompt }] }],
+    });
+    return (data?.content || []).map((part: any) => part?.text).filter(Boolean).join('\n').trim();
+  }
+  if (config.provider === 'gemini') {
+    const base = trimSlash(config.baseUrl || PROVIDER_META.gemini.defaultBaseUrl!);
+    const model = encodeURIComponent(config.model);
+    const data = await postJson(`${base}/models/${model}:generateContent`, { 'x-goog-api-key': config.apiKey }, {
+      systemInstruction: { parts: [{ text: PHOTO_MEAL_SYSTEM_PROMPT }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType, data: base64 } }] }],
+      generationConfig: { maxOutputTokens: 900, temperature: 0.1, responseMimeType: 'application/json' },
+    });
+    return (data?.candidates?.[0]?.content?.parts || []).map((part: any) => part?.text).filter(Boolean).join('\n').trim();
+  }
+  const base = trimSlash(config.baseUrl || '');
+  if (!base) throw new Error('Für den kompatiblen Anbieter ist eine Base URL erforderlich.');
+  const data = await postJson(`${base}/chat/completions`, { Authorization: `Bearer ${config.apiKey}` }, { model: config.model, temperature: 0.1, max_tokens: 900, messages: [{ role: 'system', content: PHOTO_MEAL_SYSTEM_PROMPT }, { role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: dataUrl } }] }] });
+  return data?.choices?.[0]?.message?.content?.trim() || '';
+}
+
+export async function generateMealPhotoDraft(config: AIConfig, base64: string, mimeType = 'image/jpeg'): Promise<AIQuickDraft> {
+  const prompt = `Analysiere diese Mahlzeit. Zeitpunkt: ${new Date().toLocaleString('de-DE')}. Erstelle einen prüfbaren Entwurf.`;
+  try {
+    const text = await callVisionProvider(config, base64, mimeType, prompt);
+    if (!text) throw new Error('Die KI konnte aus dem Foto keinen Entwurf erstellen.');
+    await recordAIUsage({purpose:'meal-photo',provider:config.provider,model:config.model,payloadCharacters:prompt.length+base64.length,responseCharacters:text.length,outcome:'success'}).catch(()=>undefined);
+    return parseQuickDraft(text);
+  } catch (error) { await recordAIUsage({purpose:'meal-photo',provider:config.provider,model:config.model,payloadCharacters:prompt.length+base64.length,outcome:'error',error:error instanceof Error?error.message:'Fehler'}).catch(()=>undefined); throw error; }
+}
+export async function generateHealthInsight(config: AIConfig, store: HealthStore, scope: AIDataScope, cyclePreferences?: CyclePreferences): Promise<AIHealthInsight> {
+  const prompt=buildUserPrompt(store,scope,cyclePreferences); const tx=getAITransmissionSummary(store,scope,cyclePreferences);
+  try { const raw=await callProvider(config,prompt,HEALTH_SYSTEM_PROMPT); await recordAIUsage({purpose:'health-insight',provider:config.provider,model:config.model,scope,daysIncluded:tx.daysIncluded,payloadCharacters:prompt.length,responseCharacters:raw.length,outcome:'success'}).catch(()=>undefined); return parseInsight(raw); }
+  catch(error){ await recordAIUsage({purpose:'health-insight',provider:config.provider,model:config.model,scope,daysIncluded:tx.daysIncluded,payloadCharacters:prompt.length,outcome:'error',error:error instanceof Error?error.message:'Fehler'}).catch(()=>undefined); throw error; }
 }
 
 export async function generateQuickDraft(config: AIConfig, text: string): Promise<AIQuickDraft> {
   const prompt = `Nutzereingabe:\n${text.trim()}\n\nHeute ist ${new Date().toLocaleString('de-DE')}. Erstelle nur einen speicherbaren Entwurf. Nichts diagnostizieren.`;
-  return parseQuickDraft(await callProvider(config, prompt, QUICK_CAPTURE_SYSTEM_PROMPT, 1000));
+  try { const raw=await callProvider(config,prompt,QUICK_CAPTURE_SYSTEM_PROMPT,1000); await recordAIUsage({purpose:'quick-capture',provider:config.provider,model:config.model,payloadCharacters:prompt.length,responseCharacters:raw.length,outcome:'success'}).catch(()=>undefined); return parseQuickDraft(raw); }
+  catch(error){ await recordAIUsage({purpose:'quick-capture',provider:config.provider,model:config.model,payloadCharacters:prompt.length,outcome:'error',error:error instanceof Error?error.message:'Fehler'}).catch(()=>undefined); throw error; }
 }
 
 export async function testAIConnection(config: AIConfig): Promise<void> {
-  const result = await callProvider(config, 'Dies ist ausschließlich ein Verbindungstest. Es werden keine Gesundheitsdaten übermittelt. Gib valides JSON zurück und schreibe in summary nur: Verbindung erfolgreich.', HEALTH_SYSTEM_PROMPT, 500);
-  if (!result) throw new Error('Keine Antwort vom KI-Anbieter erhalten.');
+  const prompt='Dies ist ausschließlich ein Verbindungstest. Es werden keine Gesundheitsdaten übermittelt. Gib valides JSON zurück und schreibe in summary nur: Verbindung erfolgreich.';
+  try { const result = await callProvider(config,prompt,HEALTH_SYSTEM_PROMPT,500); if (!result) throw new Error('Keine Antwort vom KI-Anbieter erhalten.'); await recordAIUsage({purpose:'connection-test',provider:config.provider,model:config.model,payloadCharacters:prompt.length,responseCharacters:result.length,outcome:'success'}).catch(()=>undefined); }
+  catch(error){ await recordAIUsage({purpose:'connection-test',provider:config.provider,model:config.model,payloadCharacters:prompt.length,outcome:'error',error:error instanceof Error?error.message:'Fehler'}).catch(()=>undefined); throw error; }
 }

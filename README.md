@@ -1,20 +1,43 @@
-# Noura 0.12
+# Noura 0.15 – Quality Release
 
-Noura ist ein persönliches Ernährung-, Symptom-, Verdauungs- und Zyklustagebuch mit optionaler BYOK-KI.
+Noura ist ein privates, diary-first Ernährung-, Symptom-, Verdauungs-, Körper- und Zyklustagebuch mit optionaler eigener KI (BYOK).
 
-## Neu in 0.12
+## Was 0.15 ergänzt
 
-- kompakter neuer „+“-Dialog statt gequetschtem Fullscreen-Sheet
-- vereinfachter Startbildschirm mit persönlichem Tages-Score, wichtigster Erkenntnis und drei Schnellaktionen
-- Profilbild aus der iPhone-Fotomediathek; ohne Bild zeigt Noura automatisch die Initialen des Namens
-- im Profil sind die Inhalte des Einrichtungsassistenten als einzelne Einstellungen erreichbar: Name/Ziele, Tracking, Körper-Check-in, Zyklus sowie Datenschutz/Hinweise
-- eigene KI: Anbieter- und Modell-Dropdowns bleiben erhalten; mit API-Key kann Noura die Modellliste live vom Anbieter laden
-- optional tägliche automatische KI-Analyse über `expo-background-task`
-- optional automatischer Backup-Snapshot in den Documents-Bereich der App; iOS kann diesen im Gerätebackup in iCloud mitsichern
-- Profilbild wird dauerhaft in den Documents-Bereich kopiert
-- kostenloser Windows/iPhone-Sideload-Workflow über GitHub macOS Runner + AltStore bleibt enthalten
+- medizinische Guardrails für dokumentierte Warnsignale (z. B. Blut im Stuhl, sehr hohe Temperatur, wiederholt starke Schmerzen)
+- KI-Transparenz vor dem Senden: Anbieter, Modell, Datenumfang, Zeitraum, grobe Token-Obergrenze und Kostenhinweis
+- lokales KI-Nutzungsprotokoll ohne API-Key
+- vollständiger Datenexport als ZIP mit JSON + CSV und wieder zusammenführbarer Import
+- Apple Health:
+  - Export-ZIP-Import bleibt für den kostenlosen Sideload-Build verfügbar
+  - optionaler direkter HealthKit-Sync ist für einen HealthKit-fähig signierten Build vorbereitet
+  - Tagesaggregation schützt vor doppeltem Zählen mehrerer Gerätequellen; überlappende Schlafintervalle werden zusammengeführt
+- iCloud:
+  - lokales Backup/Restore bleibt verfügbar
+  - optionaler CloudKit-Live-Sync ist für einen entsprechend signierten Build vorbereitet
+  - Lösch-Tombstones verhindern, dass gelöschte Tagebucheinträge aus der Cloud wieder auftauchen
+  - Pull beim Aktivieren der App sowie verzögerter Push nach Änderungen
+- Health-PDF enthält Sicherheits- und Mitfaktorhinweise
+- Food-/Symptomanalyse berücksichtigt Gegenbeispiele, Kontrollwerte, Zyklus, Stress, Schlaf, Medikamente/Supplements und Tageszeit
+- Wochenrückblick auf der Startseite
+- Siri/Kurzbefehle über Noura-Deep-Links
+- verbesserte Accessibility-Beschriftung der wichtigsten Schnellaktionen
+- zusätzliche Logik-Selbsttests für Analyse, Gegenbeispiele und Safety-Guardrails
 
-## Start auf Windows
+## Schon enthalten aus 0.14
+
+- Lebensmittel-Suche, Barcode, Favoriten, zuletzt gegessen, eigene Gerichte
+- Essensfoto → KI-Entwurf → prüfen/ändern → speichern
+- Sprache/Diktat → KI-Entwurf → prüfen/ändern → speichern
+- Medikamente & Supplements
+- Gewicht, Wasser, Schlaf, Schritte und Temperatur als optionale Kontextdaten
+- lokale Erinnerungen
+- Tagebuch mit Tagesnavigation, Bearbeiten, Zurückdatieren, Duplizieren und Undo nach Löschen
+- KI-Feedback „Hilfreich / Trifft nicht zu“
+- verschlüsselte lokale Gesundheitsdaten und optionale Face-ID-Sperre
+- Profilbild, Initialen, App-Icon und Splashscreen
+
+## Windows / schneller Test
 
 ```powershell
 cd C:\Users\Christoph\Downloads\NouraApp\NouraApp
@@ -22,21 +45,40 @@ npm.cmd install
 npx.cmd expo start -c
 ```
 
-## Wichtige iOS-Hinweise
+Hinweis: native Module wie direkter HealthKit- oder CloudKit-Zugriff laufen nicht in Expo Go. Dafür ist ein nativer Build erforderlich.
 
-### Automatische KI
+## Eigene App auf dem iPhone – kostenloser Apple Account
 
-iOS führt Background Tasks nicht minutengenau aus. Noura registriert einen täglichen Hintergrundtask mit einem Mindestintervall von 24 Stunden. iOS entscheidet anhand von Akku, Netzwerk und Nutzungsverhalten, wann er tatsächlich läuft. Wird die App im App-Switcher aktiv beendet, führt iOS den Task nicht aus, bis Noura wieder gestartet wurde.
+Der enthaltene Workflow `.github/workflows/build-ios-unsigned.yml` baut bewusst **ohne HealthKit/iCloud-Capabilities**, damit der bestehende GitHub → AltStore/AltServer-Weg mit kostenloser Signierung weiterhin möglichst kompatibel bleibt.
 
-Voraussetzungen in Noura:
-- eigene KI verbunden
-- Trackingdaten für KI-Analyse freigegeben
-- „Tägliche automatische KI-Analyse“ im Profil aktiviert
+1. Projekt nach GitHub pushen.
+2. Workflow **Build Noura iOS IPA (unsigned)** ausführen.
+3. Artifact `Noura-unsigned-ipa` laden.
+4. IPA über AltServer/AltStore auf das iPhone sideloaden.
 
-### Backup
+Die kostenlose Apple-Signierung muss regelmäßig erneuert werden.
 
-Noura schreibt bei aktiviertem Backup nach Änderungen einen JSON-Snapshot nach `Documents/Noura/noura-backup.json`. API-Keys werden nicht in diese Datei geschrieben. Dateien im Documents-Bereich sind für das iOS-Gerätebackup vorgesehen, wenn iCloud Backup auf dem iPhone aktiviert ist. Das ist aktuell **kein CloudKit-Echtzeit-Sync zwischen mehreren Geräten**.
+## HealthKit + CloudKit Build
 
-## Eigene App auf dem iPhone ohne bezahlte Membership
+Zusätzlich existiert `.github/workflows/build-ios-full-capabilities.yml`. Dieser Build aktiviert die nativen HealthKit- und CloudKit-Plugins. Die App ist damit technisch für direkten Apple-Health- und iCloud-Zugriff vorbereitet.
 
-Siehe `INSTALL_FREE_IOS_WINDOWS.md`. Der GitHub-Workflow baut eine unsignierte IPA auf einem macOS-Runner. AltStore/AltServer signiert sie mit deinem kostenlosen Apple Account. Bei kostenloser Apple-Signierung muss die App regelmäßig erneuert werden.
+Wichtig: HealthKit und CloudKit benötigen passende Apple-Entitlements / App-ID-Capabilities. Eine kostenlose Personal-Team-/AltStore-Signierung kann diese Capabilities nicht zuverlässig bereitstellen. Für die volle Variante ist in der Praxis eine geeignete Apple-Developer-Provisionierung erforderlich.
+
+## Qualitätstest
+
+Nach `npm install`:
+
+```powershell
+npm.cmd run test:logic
+npm.cmd run typecheck
+```
+
+`test:logic` prüft u. a. Lebensmittel-Signale, Kontrollwerte, Gegenbeispiele, Zykluslogik und medizinische Guardrails.
+
+## Datenschutz
+
+- Tagebuchdaten liegen lokal AES-GCM-verschlüsselt.
+- Der KI-API-Key liegt im iOS Keychain/SecureStore.
+- Externe KI erhält Trackingdaten nur nach expliziter Freigabe.
+- Portable Exporte und Backups enthalten keinen API-Key.
+- KI-Ergebnisse sind Hypothesen und keine Diagnosen.

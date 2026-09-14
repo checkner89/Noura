@@ -2,24 +2,37 @@
   "expo": {
     "name": "Noura",
     "slug": "noura-health-tracker",
-    "version": "0.12.0",
+    "version": "0.15.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F7F3EC"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "de.noura.healthtracker",
       "infoPlist": {
-        "NSCameraUsageDescription": "Noura nutzt die Kamera ausschließlich zum Scannen von Barcodes auf Lebensmittelverpackungen.",
-        "NSPhotoLibraryUsageDescription": "Noura nutzt deine Fotomediathek nur, wenn du ein Profilbild auswählst."
+        "NSCameraUsageDescription": "Noura nutzt die Kamera, um Lebensmittel-Barcodes zu scannen und auf Wunsch Mahlzeiten für einen KI-Entwurf zu fotografieren.",
+        "NSPhotoLibraryUsageDescription": "Noura nutzt deine Fotomediathek nur, wenn du ein Profilbild oder ein Essensfoto auswählst.",
+        "NSFaceIDUsageDescription": "Noura kann Face ID verwenden, um dein persönliches Gesundheits- und Ernährungstagebuch zu schützen.",
+        "NSMicrophoneUsageDescription": "Noura nutzt das Mikrofon nur, wenn du einen Eintrag diktierst.",
+        "NSSpeechRecognitionUsageDescription": "Noura wandelt deine Sprache nur auf Wunsch in Text um, damit du Einträge schneller erfassen kannst."
       },
-      "buildNumber": "4",
+      "buildNumber": "8",
       "config": {
         "usesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "de.noura.healthtracker",
-      "versionCode": 4
+      "versionCode": 8,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#F7F3EC"
+      }
     },
     "plugins": [
       [
@@ -32,12 +45,22 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Noura nutzt deine Fotomediathek nur, wenn du ein Profilbild auswählst.",
-          "cameraPermission": false,
+          "photosPermission": "Noura nutzt deine Fotomediathek nur, wenn du ein Profilbild oder ein Essensfoto auswählst.",
+          "cameraPermission": "Noura nutzt die Kamera nur, wenn du ein Essensfoto für einen KI-Entwurf aufnehmen möchtest.",
           "microphonePermission": false
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-local-authentication",
+      "expo-document-picker",
+      "expo-notifications",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Noura nutzt das Mikrofon nur, wenn du einen Eintrag diktierst.",
+          "speechRecognitionPermission": "Noura wandelt deine Sprache nur auf Wunsch in Text um, damit du Einträge schneller erfassen kannst."
+        }
+      ]
     ],
     "scheme": "noura"
   }

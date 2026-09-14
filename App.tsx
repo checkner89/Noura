@@ -18,6 +18,7 @@ import {
   View,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as LocalAuthentication from 'expo-local-authentication';
 
 import {
   AIConfig,
@@ -31,6 +32,7 @@ import {
   listAIModels,
   clearAIConfig,
   generateHealthInsight,
+  getAITransmissionSummary,
   loadAIConfig,
   loadAIConsent,
   loadAIDataScope,
@@ -43,12 +45,15 @@ import {
   buildDailyTrends,
   computeFoodSignals,
   computeFoodSignalsWindow,
+  computeFoodGroupSignals,
+  computePersonalDayScore,
   computeCycleSymptomSignals,
   computeFoodCycleSignals,
   getTimeline,
   getTodaySummary,
   getTrackingDays,
   getCycleContext,
+  getOverallDataQuality,
   isToday,
 } from './src/analysis';
 import {
@@ -57,26 +62,54 @@ import {
   addMeal,
   addSymptom,
   addObservation,
+  addMedication,
+  addHealthMetrics,
+  saveDish,
+  removeDish,
+  updateEntry,
+  toggleMealFavorite,
   clearHealthStore,
+  clearHealthEncryptionKey,
   createDemoStore,
   emptyHealthStore,
   loadHealthStore,
   removeEntry,
   saveHealthStore,
+  mergeHealthStores,
+  clearDiaryWithTombstones,
 } from './src/storage';
-import { BowelEntry, CycleEntry, CycleFlow, CycleMood, FoodItem, HealthStore, MealEntry, MealType, ObservationCategory, ObservationEntry, SymptomEntry, TimelineItem } from './src/types';
+import { BowelEntry, CycleEntry, CycleFlow, CycleMood, EntryKind, FoodItem, HealthMetricEntry, HealthMetricKind, HealthStore, MealEntry, MealType, MedicationEntry, MedicationKind, ObservationCategory, ObservationEntry, SavedDish, SymptomEntry, TimelineItem } from './src/types';
 import SetupWizard from './src/SetupWizard';
 import BarcodeScannerModal from './src/BarcodeScannerModal';
-import { GOAL_LABELS, UserProfile, createDefaultUserProfile, loadUserProfile, saveUserProfile } from './src/onboarding';
+import { GOAL_LABELS, UserProfile, clearUserProfile, createDefaultUserProfile, loadUserProfile, saveUserProfile } from './src/onboarding';
 import AIQuickCaptureModal from './src/AIQuickCaptureModal';
 import AddEntrySheet, { ManualEntryMode } from './src/AddEntrySheet';
-import { AppPreferences, defaultAppPreferences, loadAppPreferences, saveAppPreferences } from './src/preferences';
-import { writeAutomaticBackup } from './src/backup';
+import { AppPreferences, clearAppPreferences, defaultAppPreferences, loadAppPreferences, saveAppPreferences } from './src/preferences';
+import { pickBackupFile, restoreProfileImageFromBackup, shareAutomaticBackup, writeAutomaticBackup } from './src/backup';
 import { pickAndPersistProfileImage, removePersistedProfileImage } from './src/profileMedia';
-import { configureDailyAI, loadLatestAIInsight, saveLatestAIInsight, syncDailyAIRegistration } from './src/dailyAI';
+import { clearLatestAIInsight, configureDailyAI, loadLatestAIInsight, runAIAnalysisNow, saveLatestAIInsight, syncDailyAIRegistration } from './src/dailyAI';
+import { pickAndImportAppleHealth } from './src/appleHealth';
+import ProfileSettingsModal from './src/ProfileSettingsModal';
+import EntryEditorModal, { findEntry } from './src/EntryEditorModal';
+import { enrichFoodGroups } from './src/foodGroups';
+import FoodSearchModal from './src/FoodSearchModal';
+import PhotoMealCaptureModal from './src/PhotoMealCaptureModal';
+import { addReminderResponseListener, getLastReminderRoute, scheduleMealFollowup, syncRecurringReminders } from './src/reminders';
+import { createAndShareHealthReport } from './src/healthReport';
+import { clearInsightFeedback, insightFeedbackKey, loadInsightFeedback, saveInsightFeedback } from './src/aiFeedback';
+
+import { getMedicalSafetyAlerts } from './src/medicalSafety';
+import { buildWeeklyReview } from './src/weeklyReview';
+import { clearAIUsage, loadAIUsage, usagePurposeLabel } from './src/aiUsage';
+import { pickPortableExport, sharePortableExport } from './src/dataExport';
+import { isDirectHealthKitModulePresent, syncDirectAppleHealth } from './src/healthKitLive';
+import { isCloudKitModulePresent, pullCloudSnapshot, pushCloudSnapshot } from './src/cloudSync';
+import { parseNouraLink } from './src/shortcuts';
+import * as Linking from 'expo-linking';
+
 
 type Tab = 'Home' | 'Diary' | 'Tracking' | 'Analyse' | 'KI' | 'Profil';
-type TrackingMode = 'Essen' | 'Symptome' | 'Auffälligkeit' | 'Stuhlgang' | 'Zyklus';
+type TrackingMode = 'Essen' | 'Symptome' | 'Auffälligkeit' | 'Stuhlgang' | 'Zyklus' | 'Medikamente' | 'Körperdaten';
 
 const colors = {
   bg: '#F7F7F9',
@@ -224,8 +257,8 @@ function SelectionSheet({ visible, title, subtitle, options, selected, searchabl
 
 function getInitials(name?: string) {
   const parts = (name || '').trim().split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  if (parts.length >= 2) return `${parts[0]?.[0] ?? ''}${parts[parts.length - 1]?.[0] ?? ''}`.toUpperCase();
+  if (parts.length === 1) return (parts[0] ?? '').slice(0, 2).toUpperCase();
   return 'NU';
 }
 
@@ -270,9 +303,10 @@ function EmptyState({ icon, title, text }: { icon: string; title: string; text: 
   );
 }
 
-function HomeScreen({ store, profile, aiInsight, onAIQuick, onAdd, onOpenInsights, onDiary, onProfile }: {
+function HomeScreen({ store, profile, preferences, aiInsight, onAIQuick, onAdd, onOpenInsights, onDiary, onProfile }: {
   store: HealthStore;
   profile: UserProfile;
+  preferences: AppPreferences;
   aiInsight: string;
   onAIQuick: () => void;
   onAdd: (mode: TrackingMode) => void;
@@ -280,778 +314,190 @@ function HomeScreen({ store, profile, aiInsight, onAIQuick, onAdd, onOpenInsight
   onDiary: () => void;
   onProfile: () => void;
 }) {
-  const summary = useMemo(() => getTodaySummary(store), [store]);
-  const cycleContext = useMemo(() => getCycleContext(store), [store]);
-  const latestMeal = useMemo(() => store.meals.filter(x => isToday(x.createdAt)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0], [store]);
-  const latestSymptom = useMemo(() => store.symptoms.filter(x => isToday(x.createdAt)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0], [store]);
-  const topFood = useMemo(() => computeFoodSignals(store)[0], [store]);
-  const topCycle = useMemo(() => computeCycleSymptomSignals(store).find(x => x.delta > 0.3), [store]);
+  const day = useMemo(() => computePersonalDayScore(store), [store]);
+  const latest = useMemo(() => getTimeline(store, 3), [store]);
+  const groupSignal = useMemo(() => computeFoodGroupSignals(store,8,profile.cyclePreferences)[0], [store,profile.cyclePreferences]);
+  const cycleSignal = useMemo(() => computeCycleSymptomSignals(store, profile.cyclePreferences).find(x => x.delta > 0.3), [store, profile.cyclePreferences]);
+  const cycle = useMemo(() => getCycleContext(store, profile.cyclePreferences), [store, profile.cyclePreferences]);
+  const safetyAlerts = useMemo(() => getMedicalSafetyAlerts(store), [store]);
+  const weekly = useMemo(() => buildWeeklyReview(store, profile.cyclePreferences), [store, profile.cyclePreferences]);
+  const scoreTitle = day.score == null ? 'Noch kein Tagesgefühl' : day.score >= 78 ? 'Heute wirkt eher ruhig' : day.score >= 58 ? 'Ein paar Signale im Blick' : 'Heute genauer hinschauen';
+  const deltaText = day.delta == null ? 'Mit weiteren Check-ins entsteht dein persönlicher Vergleich.' : `${day.delta >= 0 ? '+' : ''}${day.delta} Punkte gegenüber deinem persönlichen Schnitt.`;
+  const insight = aiInsight || groupSignal?.friendly || (cycleSignal ? `Deine Beschwerden waren in der ${cycleSignal.phase} zuletzt häufiger stärker als sonst.` : 'Noch keine belastbare Auffälligkeit. Kurze, regelmäßige Einträge reichen völlig.');
+  return <ScrollView contentContainerStyle={styles.simpleHomeContent} showsVerticalScrollIndicator={false}>
+    <View style={styles.simpleHomeHeader}><View style={{flex:1}}><Text style={styles.simpleHomeGreeting}>{profile.displayName ? `Hi ${profile.displayName.split(' ')[0]}` : 'Heute'}</Text><Text style={styles.simpleHomeDate}>{new Date().toLocaleDateString('de-DE',{weekday:'long',day:'2-digit',month:'long'})}</Text></View><ProfileAvatar profile={profile} size={44} onPress={onProfile}/></View>
 
-  const score = useMemo(() => {
-    if (!latestSymptom) return null;
-    const burden = (latestSymptom.pain + latestSymptom.bloating + latestSymptom.nausea + latestSymptom.heartburn) / 4;
-    const raw = 82 - burden * 5.2 - latestSymptom.stress * 1.6 + latestSymptom.energy * 2.8;
-    return Math.max(0, Math.min(100, Math.round(raw)));
-  }, [latestSymptom]);
 
-  const insight = aiInsight
-    ? aiInsight
-    : topFood ? `${topFood.food} fällt wiederholt vor stärkeren Beschwerden auf. Das ist ein Signal, noch keine Ursache.`
-    : topCycle ? `Deine Beschwerden sind in der ${topCycle.phase} bisher etwas stärker als im persönlichen Durchschnitt.`
-    : 'Noch keine belastbare Auffälligkeit. Regelmäßige kurze Einträge machen Muster mit der Zeit sichtbar.';
+    {safetyAlerts.length ? <View style={styles.safetyHomeCard}><Text style={styles.safetyHomeIcon}>!</Text><View style={{flex:1}}><Text style={styles.safetyHomeTitle}>{safetyAlerts[0].title}</Text><Text style={styles.safetyHomeText}>{safetyAlerts[0].message}</Text><Text style={styles.safetyHomeAction}>{safetyAlerts[0].action}</Text></View></View> : null}
 
-  const scoreCopy = score == null
-    ? 'Ein kurzer Gefühl-Check-in reicht, damit Noura dein heutiges Tagesbild berechnen kann.'
-    : score >= 75 ? 'Deine heutigen Angaben wirken insgesamt eher ruhig.'
-    : score >= 50 ? 'Heute gibt es ein paar Belastungssignale – beobachte, was dir auffällt.'
-    : 'Deine heutigen Angaben zeigen eine höhere Belastung. Bei starken oder anhaltenden Beschwerden bitte medizinisch abklären.';
-
-  return (
-    <ScrollView contentContainerStyle={styles.simpleHomeContent} showsVerticalScrollIndicator={false}>
-      <View style={styles.simpleHomeHeader}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.simpleHomeGreeting}>{profile.displayName ? `Hi ${profile.displayName.split(' ')[0]}` : 'Heute'}</Text>
-          <Text style={styles.simpleHomeDate}>{new Date().toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: 'long' })}</Text>
-        </View>
-        <ProfileAvatar profile={profile} size={44} onPress={onProfile} />
-      </View>
-
-      <View style={styles.scoreHero}>
-        <View style={styles.scoreHeroCircle}>
-          <Text style={styles.scoreHeroValue}>{score == null ? '–' : score}</Text>
-          <Text style={styles.scoreHeroOf}>/ 100</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.scoreHeroKicker}>DEIN TAGESBILD</Text>
-          <Text style={styles.scoreHeroTitle}>{score == null ? 'Wie geht es dir heute?' : score >= 75 ? 'Heute wirkt eher ruhig' : score >= 50 ? 'Ein paar Signale im Blick' : 'Heute genauer hinschauen'}</Text>
-          <Text style={styles.scoreHeroText}>{scoreCopy}</Text>
-          {score == null && <TouchableOpacity onPress={() => onAdd('Symptome')} style={styles.scoreHeroButton}><Text style={styles.scoreHeroButtonText}>Gefühl eintragen</Text></TouchableOpacity>}
-        </View>
-      </View>
-
-      <TouchableOpacity style={styles.homeInsightCard} onPress={onOpenInsights} activeOpacity={0.9}>
-        <View style={styles.homeInsightTop}><Text style={styles.homeInsightKicker}>WICHTIGSTE ERKENNTNIS</Text><Text style={styles.homeInsightArrow}>›</Text></View>
-        <Text style={styles.homeInsightText} numberOfLines={3}>{insight}</Text>
-        <Text style={styles.homeInsightFoot}>Tippen für Analyse & Details</Text>
-      </TouchableOpacity>
-
-      <TouchableOpacity style={styles.tellNouraRow} onPress={onAIQuick} activeOpacity={0.88}>
-        <View style={styles.tellNouraIcon}><Text style={styles.tellNouraIconText}>✦</Text></View>
-        <View style={{ flex: 1 }}><Text style={styles.tellNouraTitle}>Noura einfach erzählen</Text><Text style={styles.tellNouraSub}>Essen, Gefühl oder Auffälligkeit in einem Satz.</Text></View>
-        <Text style={styles.tellNouraArrow}>›</Text>
-      </TouchableOpacity>
-
-      <View style={styles.homeQuickRow}>
-        <TouchableOpacity style={styles.homeQuickButton} onPress={() => onAdd('Essen')}><Text style={styles.homeQuickIcon}>🍽</Text><Text style={styles.homeQuickText}>Essen</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.homeQuickButton} onPress={() => onAdd('Symptome')}><Text style={styles.homeQuickIcon}>◌</Text><Text style={styles.homeQuickText}>Gefühl</Text></TouchableOpacity>
-        <TouchableOpacity style={styles.homeQuickButton} onPress={() => onAdd('Auffälligkeit')}><Text style={styles.homeQuickIcon}>!</Text><Text style={styles.homeQuickText}>Auffällig</Text></TouchableOpacity>
-      </View>
-
-      <View style={styles.homeTodayCard}>
-        <View style={styles.homeTodayHeader}><Text style={styles.homeTodayTitle}>Heute</Text><TouchableOpacity onPress={onDiary}><Text style={styles.homeTodayLink}>Tagebuch ›</Text></TouchableOpacity></View>
-        <View style={styles.homeTodayStats}>
-          <View style={styles.homeTodayStat}><Text style={styles.homeTodayValue}>{summary.mealCount}</Text><Text style={styles.homeTodayLabel}>Mahlzeiten</Text></View>
-          <View style={styles.homeTodayStat}><Text style={styles.homeTodayValue}>{store.symptoms.filter(x => isToday(x.createdAt)).length}</Text><Text style={styles.homeTodayLabel}>Check-ins</Text></View>
-          <View style={styles.homeTodayStat}><Text style={styles.homeTodayValue}>{store.bowel.filter(x => isToday(x.createdAt)).length}</Text><Text style={styles.homeTodayLabel}>Stuhlgang</Text></View>
-        </View>
-        {latestMeal && <View style={styles.homeLastRow}><Text style={styles.homeLastLabel}>Zuletzt gegessen</Text><Text style={styles.homeLastValue} numberOfLines={1}>{latestMeal.foods.map(x => x.name).join(', ')}</Text></View>}
-        {profile.tracking.cycle && <View style={styles.homeLastRow}><Text style={styles.homeLastLabel}>Zyklus</Text><Text style={styles.homeLastValue}>{cycleContext.bleedingToday ? 'Periode heute' : cycleContext.estimatedCycleDay ? `ca. Tag ${cycleContext.estimatedCycleDay} · ${cycleContext.estimatedPhase || ''}` : 'Noch zu wenig Daten'}</Text></View>}
-      </View>
-
-      <Text style={styles.homeScoreDisclaimer}>Der Tages-Score ist eine vereinfachte Darstellung deiner eigenen Angaben und keine medizinische Bewertung.</Text>
-    </ScrollView>
-  );
-}
-
-function TimelineRow({ item, border, onDelete }: { item: TimelineItem; border?: boolean; onDelete?: () => void }) {
-  const icons = { meal: '🍽️', symptom: '◌', bowel: '◉', cycle: '◐', observation: '!' } as const;
-  return (
-    <View style={[styles.timelineRow, border && styles.rowBorder]}>
-      <View style={styles.timelineIcon}><Text>{icons[item.kind]}</Text></View>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.timelineTitle}>{item.title}</Text>
-        <Text style={styles.timelineSub}>{item.subtitle}</Text>
-        <Text style={styles.timelineTime}>{formatDateTime(item.createdAt)}</Text>
-      </View>
-      {!!onDelete && <TouchableOpacity style={styles.deleteMini} onPress={onDelete}><Text style={styles.deleteMiniText}>×</Text></TouchableOpacity>}
+    <View style={styles.scoreHero}>
+      <View style={styles.scoreHeroCircle}><Text style={styles.scoreHeroValue}>{day.score ?? '–'}</Text><Text style={styles.scoreHeroOf}>Tagesgefühl</Text></View>
+      <View style={{flex:1}}><Text style={styles.scoreHeroKicker}>NOURA TAGESGEFÜHL</Text><Text style={styles.scoreHeroTitle}>{scoreTitle}</Text><Text style={styles.scoreHeroText}>{deltaText}</Text>{day.score==null?<TouchableOpacity onPress={()=>onAdd('Symptome')} style={styles.scoreHeroButton}><Text style={styles.scoreHeroButtonText}>Kurz eintragen</Text></TouchableOpacity>:null}</View>
     </View>
-  );
+
+    <TouchableOpacity style={styles.homeInsightCard} onPress={onOpenInsights} activeOpacity={0.88}>
+      <View style={styles.homeInsightTop}><Text style={styles.homeInsightKicker}>WAS NOURA AUFFÄLLT</Text><Text style={styles.homeInsightArrow}>›</Text></View><Text style={styles.homeInsightText} numberOfLines={3}>{insight}</Text><Text style={styles.homeInsightFoot}>Details, Datenlage und nächste Schritte</Text>
+    </TouchableOpacity>
+
+
+    {preferences.weeklyReviewEnabled && weekly.trackingDays >= 3 ? <View style={styles.weeklyHomeCard}><View style={{flex:1}}><Text style={styles.weeklyHomeKicker}>DEINE LETZTEN 7 TAGE</Text><Text style={styles.weeklyHomeTitle}>{weekly.summary}</Text><Text style={styles.weeklyHomeMeta}>{weekly.trackingDays} Tracking-Tage · Datenlage {weekly.dataQuality}</Text></View></View> : null}
+
+    <TouchableOpacity style={styles.tellNouraRow} onPress={onAIQuick} activeOpacity={0.88}><View style={styles.tellNouraIcon}><Text style={styles.tellNouraIconText}>✦</Text></View><View style={{flex:1}}><Text style={styles.tellNouraTitle}>Noura erzählen</Text><Text style={styles.tellNouraSub}>„Ich hatte Pasta und bin jetzt aufgebläht.“</Text></View><Text style={styles.tellNouraArrow}>›</Text></TouchableOpacity>
+
+    <View style={styles.homeTodayCard}><View style={styles.homeTodayHeader}><Text style={styles.homeTodayTitle}>Zuletzt</Text><TouchableOpacity onPress={onDiary}><Text style={styles.homeTodayLink}>Tagebuch ›</Text></TouchableOpacity></View>
+      {latest.length ? latest.map((item,index)=><View key={`${item.kind}-${item.id}`} style={[styles.homeLastRow,index<latest.length-1&&{borderBottomWidth:StyleSheet.hairlineWidth,borderBottomColor:colors.line,paddingBottom:10}]}><View style={{flex:1}}><Text style={styles.homeLastLabel}>{formatDateTime(item.createdAt)}</Text><Text style={[styles.homeLastValue,{textAlign:'left'}]} numberOfLines={1}>{item.title} · {item.subtitle}</Text></View></View>) : <Text style={styles.helper}>Noch keine Einträge. Du kannst einfach Noura erzählen, was gerade war.</Text>}
+      {profile.tracking.cycle && cycle.estimatedCycleDay ? <View style={[styles.homeLastRow,{marginTop:8}]}><Text style={styles.homeLastLabel}>Zykluskontext</Text><Text style={styles.homeLastValue}>ca. Tag {cycle.estimatedCycleDay} · {cycle.estimatedPhase}</Text></View>:null}
+    </View>
+    <Text style={styles.homeScoreDisclaimer}>Das Tagesgefühl vergleicht nur deine eigenen dokumentierten Angaben und ist keine medizinische Bewertung.</Text>
+  </ScrollView>;
 }
 
+function TimelineRow({ item, border, onPress }: { item: TimelineItem; border?: boolean; onPress?: () => void }) {
+  const icons: Record<TimelineItem['kind'], string> = { meal:'🍽️', symptom:'◌', bowel:'◎', cycle:'◐', observation:'!', medication:'✚', metric:'♡' };
+  return <TouchableOpacity disabled={!onPress} onPress={onPress} activeOpacity={0.72} style={[styles.timelineRow,border&&styles.rowBorder]}>
+    <View style={styles.timelineIcon}><Text>{icons[item.kind]}</Text></View><View style={{flex:1}}><Text style={styles.timelineTitle}>{item.title}</Text><Text style={styles.timelineSub} numberOfLines={2}>{item.subtitle}</Text><Text style={styles.timelineTime}>{formatDateTime(item.createdAt)}</Text></View>{onPress?<Text style={styles.profileSettingChevron}>›</Text>:null}
+  </TouchableOpacity>;
+}
 
-function DiaryScreen({ store, onDelete, onAdd }: {
-  store: HealthStore;
-  onDelete: (kind: 'meal' | 'symptom' | 'bowel' | 'cycle' | 'observation', id: string) => void;
-  onAdd: () => void;
+function DiaryScreen({ store, onOpenEntry }: { store: HealthStore; onOpenEntry: (item: TimelineItem) => void }) {
+  const [query,setQuery]=useState('');
+  const [selectedDay,setSelectedDay]=useState<string|undefined>();
+  const timeline=useMemo(()=>getTimeline(store,1000),[store]);
+  const dayDate=selectedDay?new Date(`${selectedDay}T12:00:00`):undefined;
+  const shiftDay=(delta:number)=>{const d=dayDate?new Date(dayDate):new Date();d.setDate(d.getDate()+delta);setSelectedDay(dateInput(d));};
+  const filtered=useMemo(()=>{
+    const needle=query.trim().toLocaleLowerCase('de-DE');
+    return timeline.filter(item=>{
+      if(selectedDay&&dateInput(new Date(item.createdAt))!==selectedDay)return false;
+      return !needle||`${item.title} ${item.subtitle}`.toLocaleLowerCase('de-DE').includes(needle);
+    });
+  },[timeline,query,selectedDay]);
+  const grouped=useMemo(()=>{const result:Array<{key:string;label:string;items:TimelineItem[]}>=[];for(const item of filtered){const d=new Date(item.createdAt);const key=d.toDateString();let g=result.find(x=>x.key===key);if(!g){const today=new Date();const y=new Date();y.setDate(today.getDate()-1);const label=d.toDateString()===today.toDateString()?'Heute':d.toDateString()===y.toDateString()?'Gestern':d.toLocaleDateString('de-DE',{weekday:'long',day:'numeric',month:'long'});g={key,label,items:[]};result.push(g);}g.items.push(item);}return result;},[filtered]);
+  const recentDays=useMemo(()=>Array.from({length:10},(_,i)=>{const d=new Date();d.setDate(d.getDate()-i);return d;}),[]);
+  return <ScrollView contentContainerStyle={styles.diaryScreenContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <View style={styles.foodlogHeader}><View><Text style={styles.foodlogHeaderTitle}>Tagebuch</Text><Text style={styles.foodlogHeaderSub}>Alles, was du festgehalten hast.</Text></View></View>
+    <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput accessibilityLabel="Tagebuch durchsuchen" value={query} onChangeText={setQuery} placeholder="Eintrag suchen" placeholderTextColor="#9B98A0" style={styles.searchInput}/></View>
+    <View style={{flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#FFF',borderRadius:18,borderWidth:1,borderColor:colors.line,padding:8}}>
+      <TouchableOpacity accessibilityLabel="Vorheriger Tag" onPress={()=>shiftDay(-1)} style={[styles.secondaryButton,{paddingHorizontal:13,paddingVertical:9}]}><Text style={styles.secondaryButtonText}>‹</Text></TouchableOpacity>
+      <TouchableOpacity onPress={()=>setSelectedDay(selectedDay?undefined:dateInput())} style={{flex:1,alignItems:'center'}}><Text style={{fontWeight:'900',color:colors.text}}>{selectedDay?new Date(`${selectedDay}T12:00:00`).toLocaleDateString('de-DE',{weekday:'short',day:'2-digit',month:'long',year:'numeric'}):'Alle Einträge'}</Text><Text style={styles.helper}>{selectedDay?'Antippen für alle Tage':'Tag auswählen oder blättern'}</Text></TouchableOpacity>
+      <TouchableOpacity accessibilityLabel="Nächster Tag" onPress={()=>shiftDay(1)} disabled={selectedDay===dateInput()} style={[styles.secondaryButton,{paddingHorizontal:13,paddingVertical:9},selectedDay===dateInput()&&styles.buttonDisabled]}><Text style={styles.secondaryButtonText}>›</Text></TouchableOpacity>
+    </View>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{gap:7,paddingVertical:2}}><Pill label="Alle" active={!selectedDay} onPress={()=>setSelectedDay(undefined)} compact/>{recentDays.map((d,i)=>{const key=dateInput(d);return <Pill key={key} label={i===0?'Heute':d.toLocaleDateString('de-DE',{weekday:'short',day:'2-digit'})} active={selectedDay===key} onPress={()=>setSelectedDay(key)} compact/>})}</ScrollView>
+    {grouped.length?grouped.map(group=><View key={group.key} style={styles.diaryGroup}><Text style={styles.diaryDate}>{group.label}</Text><View style={styles.diaryCard}>{group.items.map((item,index)=><TimelineRow key={`${item.kind}-${item.id}`} item={item} border={index<group.items.length-1} onPress={item.kind==='metric'?undefined:()=>onOpenEntry(item)}/>)}</View></View>):<EmptyState icon="⌕" title="Keine Einträge" text={query?'Versuche einen anderen Suchbegriff.':'Für diesen Tag gibt es noch nichts.'}/>} 
+  </ScrollView>;
+}
+function SeverityPicker({ title, value, onChange, reverse }: { title:string; value?:number; onChange:(v:number|undefined)=>void; reverse?:boolean }) {
+  const options:Array<[string,number|undefined]>=[['Nicht erfasst',undefined],['Keine',0],['Leicht',2],['Mittel',5],['Stark',8],['Sehr stark',10]];
+  return <ShadowCard><Text style={styles.counterTitle}>{title}</Text><View style={[styles.pillWrap,{marginTop:9}]}>{options.map(([label,v])=><Pill key={label} label={label} active={value===v} onPress={()=>onChange(v)} compact/>)}</View>{reverse?<Text style={styles.helper}>Für Energie bedeutet „stark“ hier bewusst nicht dasselbe – nutze stattdessen die 0–10 Detailangabe unter „Mehr“.</Text>:null}</ShadowCard>;
+}
+
+function Counter({ title, value, onChange, onClear, min = 0, max = 10, helper }: { title:string; value?:number; onChange:(v:number)=>void; onClear?:()=>void; min?:number; max?:number; helper?:string }) {
+  const current = value ?? Math.round((min + max) / 2);
+  return <ShadowCard><View style={styles.counterRow}><View style={{flex:1}}><Text style={styles.counterTitle}>{title}</Text>{helper?<Text style={styles.helper}>{helper}</Text>:null}{value==null?<Text style={styles.helper}>Nicht erfasst</Text>:onClear?<TouchableOpacity onPress={onClear}><Text style={[styles.link,{fontSize:10}]}>Wert entfernen</Text></TouchableOpacity>:null}</View><View style={styles.stepper}><TouchableOpacity onPress={()=>onChange(Math.max(min,current-1))} style={styles.stepButton}><Text style={styles.stepButtonText}>−</Text></TouchableOpacity><Text style={styles.stepValue}>{value==null?'–':`${value}/${max}`}</Text><TouchableOpacity onPress={()=>onChange(Math.min(max,current+1))} style={styles.stepButton}><Text style={styles.stepButtonText}>+</Text></TouchableOpacity></View></View></ShadowCard>;
+}
+
+function defaultMealType(): MealType { const h=new Date().getHours(); return h<11?'Frühstück':h<15?'Mittagessen':h<19?'Snack':'Abendessen'; }
+function dateInput(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
+function timeInput(d=new Date()){return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
+function inputTimestamp(date:string,time:string){const x=new Date(`${date}T${time}:00`);return Number.isNaN(x.getTime())?new Date().toISOString():x.toISOString();}
+
+function TrackingScreen({ store, profile, aiConfig, initialMode, onSaveMeal, onSaveSymptom, onSaveBowel, onSaveCycle, onSaveObservation, onSaveMedication, onSaveMetrics, onSaveDish, onRemoveDish, onDone }: {
+  store:HealthStore; profile:UserProfile; aiConfig:AIConfig|null; initialMode:TrackingMode;
+  onSaveMeal:(entry:MealEntry)=>void; onSaveSymptom:(entry:SymptomEntry)=>void; onSaveBowel:(entry:BowelEntry)=>void; onSaveCycle:(entry:CycleEntry)=>void; onSaveObservation:(entry:ObservationEntry)=>void; onSaveMedication:(entry:MedicationEntry)=>void; onSaveMetrics:(entries:HealthMetricEntry[])=>void; onSaveDish:(dish:SavedDish)=>void; onRemoveDish:(id:string)=>void; onDone:()=>void;
 }) {
-  const [query, setQuery] = useState('');
-  const timeline = useMemo(() => getTimeline(store, 300), [store]);
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase('de-DE');
-    if (!needle) return timeline;
-    return timeline.filter(item => `${item.title} ${item.subtitle}`.toLocaleLowerCase('de-DE').includes(needle));
-  }, [timeline, query]);
+  const [mode,setMode]=useState<TrackingMode>(initialMode); useEffect(()=>setMode(initialMode),[initialMode]);
+  const [entryDate,setEntryDate]=useState(dateInput()); const [entryTime,setEntryTime]=useState(timeInput());
+  const [more,setMore]=useState(false); const [savedMessage,setSavedMessage]=useState('');
+  const flash=(m:string)=>{setSavedMessage(m);setTimeout(()=>setSavedMessage(''),1800)};
+  const createdAt=()=>inputTimestamp(entryDate,entryTime);
 
-  const grouped = useMemo(() => {
-    const result: Array<{ key: string; label: string; items: TimelineItem[] }> = [];
-    for (const item of filtered) {
-      const d = new Date(item.createdAt);
-      const key = d.toDateString();
-      let group = result.find(x => x.key === key);
-      if (!group) {
-        const today = new Date();
-        const yesterday = new Date(); yesterday.setDate(today.getDate() - 1);
-        const label = d.toDateString() === today.toDateString() ? 'Heute' : d.toDateString() === yesterday.toDateString() ? 'Gestern' : d.toLocaleDateString('de-DE', { day: 'numeric', month: 'long' });
-        group = { key, label, items: [] };
-        result.push(group);
-      }
-      group.items.push(item);
-    }
-    return result;
-  }, [filtered]);
+  const [mealType,setMealType]=useState<MealType>(defaultMealType()); const [foodName,setFoodName]=useState(''); const [foodAmount,setFoodAmount]=useState(''); const [foodKcal,setFoodKcal]=useState(''); const [foods,setFoods]=useState<FoodItem[]>([]); const [mealNote,setMealNote]=useState(''); const [mealPhotoUri,setMealPhotoUri]=useState<string|undefined>(); const [scannerOpen,setScannerOpen]=useState(false); const [foodSearchOpen,setFoodSearchOpen]=useState(false); const [photoOpen,setPhotoOpen]=useState(false); const [scannedCode,setScannedCode]=useState(''); const [cameraPermission,requestCameraPermission]=useCameraPermissions(); const [scannerBusy,setScannerBusy]=useState(false); const scannerBusyRef=useRef(false); const cameraApi=CameraView as any;
+  const [pain,setPain]=useState<number|undefined>(); const [bloating,setBloating]=useState<number|undefined>(); const [nausea,setNausea]=useState<number|undefined>(); const [heartburn,setHeartburn]=useState<number|undefined>(); const [energy,setEnergy]=useState<number|undefined>(); const [stress,setStress]=useState<number|undefined>(); const [temperature,setTemperature]=useState(''); const [symptomNote,setSymptomNote]=useState('');
+  const [observationText,setObservationText]=useState(''); const [observationCategory,setObservationCategory]=useState<ObservationCategory|undefined>(); const [observationSeverity,setObservationSeverity]=useState<number|undefined>();
+  const [bristolType,setBristolType]=useState(4); const [urgency,setUrgency]=useState<number|undefined>(); const [mucus,setMucus]=useState(false); const [blood,setBlood]=useState(false); const [bowelPain,setBowelPain]=useState<number|undefined>(); const [bowelNote,setBowelNote]=useState('');
+  const [cycleBleeding,setCycleBleeding]=useState(false); const [cycleFlow,setCycleFlow]=useState<CycleFlow>('medium'); const [cycleCramps,setCycleCramps]=useState<number|undefined>(); const [cycleCravings,setCycleCravings]=useState<number|undefined>(); const [cycleHeadache,setCycleHeadache]=useState<number|undefined>(); const [cycleBreastTenderness,setCycleBreastTenderness]=useState<number|undefined>(); const [cycleMood,setCycleMood]=useState<CycleMood|undefined>(); const [cycleBasalTemp,setCycleBasalTemp]=useState(''); const [cycleNote,setCycleNote]=useState('');
+  const [medKind,setMedKind]=useState<MedicationKind>('medication'); const [medName,setMedName]=useState(''); const [medDose,setMedDose]=useState(''); const [medNote,setMedNote]=useState('');
+  const [metricWeight,setMetricWeight]=useState(''); const [metricWater,setMetricWater]=useState(''); const [metricSleep,setMetricSleep]=useState(''); const [metricSteps,setMetricSteps]=useState(''); const [metricTemp,setMetricTemp]=useState('');
 
-  return (
-    <ScrollView contentContainerStyle={styles.diaryScreenContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-      <View style={styles.foodlogHeader}>
-        <View><Text style={styles.foodlogHeaderTitle}>Tagebuch</Text><Text style={styles.foodlogHeaderSub}>Deine Einträge auf einen Blick.</Text></View>
-      </View>
-      <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={query} onChangeText={setQuery} placeholder="Eintrag suchen" placeholderTextColor="#9B98A0" style={styles.searchInput} /></View>
+  const hasBodyMetrics=profile.tracking.weight||profile.tracking.water||profile.tracking.sleep||profile.tracking.movement||profile.tracking.temperature;
+  const availableModes=useMemo<TrackingMode[]>(()=>[...(profile.tracking.meals?['Essen' as TrackingMode]:[]),...(profile.tracking.symptoms?['Symptome' as TrackingMode]:[]),'Auffälligkeit',...(profile.tracking.bowel?['Stuhlgang' as TrackingMode]:[]),...(profile.tracking.cycle?['Zyklus' as TrackingMode]:[]),...(profile.tracking.medications?['Medikamente' as TrackingMode]:[]),...(hasBodyMetrics?['Körperdaten' as TrackingMode]:[])],[profile.tracking,hasBodyMetrics]);
+  const recentMeals=useMemo(()=>store.meals.slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,5),[store.meals]);
+  const favoriteMeals=useMemo(()=>store.meals.filter(x=>x.favorite).slice(0,5),[store.meals]);
 
-      {grouped.length ? grouped.map(group => (
-        <View key={group.key} style={styles.diaryGroup}>
-          <Text style={styles.diaryDate}>{group.label}</Text>
-          <View style={styles.diaryCard}>
-            {group.items.map((item, index) => (
-              <TimelineRow
-                key={`${item.kind}-${item.id}`}
-                item={item}
-                border={index < group.items.length - 1}
-                onDelete={() => Alert.alert('Eintrag löschen?', 'Der Eintrag wird nur von diesem Gerät entfernt.', [
-                  { text: 'Abbrechen', style: 'cancel' },
-                  { text: 'Löschen', style: 'destructive', onPress: () => onDelete(item.kind, item.id) },
-                ])}
-              />
-            ))}
-          </View>
-        </View>
-      )) : <EmptyState icon="⌕" title="Keine Einträge gefunden" text={query ? 'Versuche einen anderen Suchbegriff.' : 'Lege deinen ersten Tagebucheintrag an.'} />}
-    </ScrollView>
-  );
+  useEffect(()=>{if(typeof cameraApi.onModernBarcodeScanned!=='function')return;const sub=cameraApi.onModernBarcodeScanned((event:{data?:string})=>{const raw=String(event?.data||'').trim();if(!raw||!scannerBusyRef.current)return;scannerBusyRef.current=false;setScannerBusy(false);const clean=raw.replace(/[\s-]+/g,'');const show=()=>{setScannedCode(clean);setScannerOpen(true)};if(Platform.OS==='ios'&&typeof cameraApi.dismissScanner==='function')cameraApi.dismissScanner().catch(()=>undefined).finally(()=>setTimeout(show,80));else setTimeout(show,80);});return()=>sub?.remove?.();},[]);
+  const openBarcodeCamera=async()=>{try{let granted=!!cameraPermission?.granted;if(!granted){const r=await requestCameraPermission();granted=!!r.granted;}if(!granted){Alert.alert('Kamera nicht freigegeben','Bitte erlaube Noura den Kamerazugriff.');return;}if(!cameraApi.isModernBarcodeScannerAvailable||typeof cameraApi.launchScanner!=='function'){setScannerOpen(true);return;}scannerBusyRef.current=true;setScannerBusy(true);await cameraApi.launchScanner({isGuidanceEnabled:true,isHighlightingEnabled:true,isPinchToZoomEnabled:true});setScannerBusy(false);}catch{scannerBusyRef.current=false;setScannerBusy(false);setScannerOpen(true);}};
+
+  const addFood=()=>{if(!foodName.trim())return;const parsed=Number(foodKcal.replace(',','.'));const food=enrichFoodGroups({id:uid('food'),name:foodName.trim(),amount:foodAmount.trim()||undefined,kcal:Number.isFinite(parsed)&&parsed>=0?Math.round(parsed):undefined,source:'manual'});setFoods(c=>[...c,food]);setFoodName('');setFoodAmount('');setFoodKcal('');};
+  const useMeal=(m:MealEntry)=>{setMealType(m.mealType);setFoods(m.foods.map(f=>({...f,id:uid('food')})));setMealNote(m.note||'');setMealPhotoUri(m.photoUri);};
+  const useDish=(d:SavedDish)=>{setMealType(d.mealType||defaultMealType());setFoods(d.foods.map(f=>({...f,id:uid('food'),source:'saved-dish'})));setMealNote(d.note||'');};
+  const saveCurrentDish=()=>{
+    if(!foods.length)return;
+    const suggested=foods.map(f=>f.name).slice(0,2).join(' + ')||'Mein Gericht';
+    const persist=(raw?:string)=>{const name=(raw||suggested).trim()||suggested;onSaveDish({id:uid('dish'),name,mealType,foods:foods.map(f=>({...f,id:uid('food')})),note:mealNote.trim()||undefined,createdAt:new Date().toISOString()});flash('Eigenes Gericht gespeichert');};
+    if(Platform.OS==='ios' && typeof (Alert as any).prompt==='function') (Alert as any).prompt('Gericht speichern','Wie möchtest du es nennen?',[{text:'Abbrechen',style:'cancel'},{text:'Speichern',onPress:(value?:string)=>persist(value)}],'plain-text',suggested);
+    else persist(suggested);
+  };
+  const saveMeal=()=>{if(!foods.length){Alert.alert('Noch nichts eingetragen','Füge mindestens ein Lebensmittel hinzu.');return;}onSaveMeal({id:uid('meal'),createdAt:createdAt(),mealType,foods:foods.map(enrichFoodGroups),note:mealNote.trim()||undefined,photoUri:mealPhotoUri});flash('Gespeichert');setTimeout(onDone,180);};
+  const saveSymptoms=()=>{const temp=Number(temperature.replace(',','.'));const entry:SymptomEntry={id:uid('sym'),createdAt:createdAt(),pain,bloating,nausea,heartburn,energy,stress,temperature:Number.isFinite(temp)&&temperature.trim()?temp:undefined,note:symptomNote.trim()||undefined};if([entry.pain,entry.bloating,entry.nausea,entry.heartburn,entry.energy,entry.stress,entry.temperature].every(v=>v==null)&&!entry.note){Alert.alert('Noch nichts ausgewählt','Wähle mindestens ein Gefühl oder schreibe eine Notiz.');return;}onSaveSymptom(entry);flash('Gespeichert');setTimeout(onDone,180);};
+  const saveObservation=()=>{if(!observationText.trim()){Alert.alert('Was ist dir aufgefallen?','Ein kurzer Satz reicht.');return;}onSaveObservation({id:uid('obs'),createdAt:createdAt(),text:observationText.trim(),category:observationCategory,severity:observationSeverity});flash('Beobachtung gespeichert');setTimeout(onDone,180);};
+  const saveBowel=()=>{onSaveBowel({id:uid('bowel'),createdAt:createdAt(),bristolType,urgency,mucus:mucus||undefined,blood:blood||undefined,pain:bowelPain,note:bowelNote.trim()||undefined});flash('Gespeichert');setTimeout(onDone,180);};
+  const saveCycle=()=>{const bt=Number(cycleBasalTemp.replace(',','.'));onSaveCycle({id:uid('cycle'),createdAt:createdAt(),bleeding:cycleBleeding,flow:cycleBleeding?cycleFlow:undefined,cramps:cycleCramps,cravings:cycleCravings,headache:cycleHeadache,breastTenderness:cycleBreastTenderness,mood:cycleMood,basalTemperature:Number.isFinite(bt)&&cycleBasalTemp.trim()?bt:undefined,note:cycleNote.trim()||undefined});flash('Gespeichert');setTimeout(onDone,180);};
+  const saveMedication=()=>{if(!medName.trim()){Alert.alert('Was hast du genommen?','Name des Medikaments oder Supplements reicht.');return;}onSaveMedication({id:uid('med'),createdAt:createdAt(),kind:medKind,name:medName.trim(),dose:medDose.trim()||undefined,note:medNote.trim()||undefined});flash('Gespeichert');setTimeout(onDone,180);};
+  const saveMetrics=()=>{const specs:Array<[HealthMetricKind,string,string]>=[['weight',metricWeight,'kg'],['water',metricWater,'ml'],['sleep',metricSleep,'h'],['steps',metricSteps,'Schritte'],['bodyTemperature',metricTemp,'°C']];const entries:HealthMetricEntry[]=specs.flatMap(([kind,raw,unit])=>{const v=Number(raw.replace(',','.'));return raw.trim()&&Number.isFinite(v)?[{id:uid(`metric-${kind}`),createdAt:createdAt(),kind,value:v,unit,source:'manual' as const}]:[];});if(!entries.length){Alert.alert('Noch kein Messwert','Trage mindestens einen Wert ein.');return;}onSaveMetrics(entries);flash('Körperdaten gespeichert');setTimeout(onDone,180);};
+
+  const TimeCard=()=> <View style={styles.infoStrip}><View style={{flexDirection:'row',gap:8,alignItems:'center'}}><Text style={{fontSize:18}}>◷</Text><View style={{flex:1}}><Text style={[styles.cardTitle,{fontSize:12}]}>Zeitpunkt</Text><Text style={styles.helper}>Wann war es wirklich?</Text></View><TextInput accessibilityLabel="Datum" value={entryDate} onChangeText={setEntryDate} style={[styles.input,{width:104,paddingVertical:8,fontSize:11}]} /><TextInput accessibilityLabel="Uhrzeit" value={entryTime} onChangeText={setEntryTime} style={[styles.input,{width:67,paddingVertical:8,fontSize:11}]} /></View></View>;
+  return <><BarcodeScannerModal visible={scannerOpen} initialCode={scannedCode||undefined} onClose={()=>{setScannerOpen(false);setScannedCode('')}} onScanAgain={()=>{setScannerOpen(false);setTimeout(openBarcodeCamera,180)}} onAdd={food=>{setFoods(c=>[...c,enrichFoodGroups(food)]);flash('Produkt hinzugefügt')}}/>
+  <FoodSearchModal visible={foodSearchOpen} onClose={()=>setFoodSearchOpen(false)} onAdd={food=>{setFoods(c=>[...c,enrichFoodGroups(food)]);setFoodSearchOpen(false);flash('Lebensmittel hinzugefügt')}} />
+  <PhotoMealCaptureModal visible={photoOpen} config={aiConfig} onClose={()=>setPhotoOpen(false)} onConfirm={(photoFoods,nextMealType,uri)=>{setMealType(nextMealType);setFoods(photoFoods.map(enrichFoodGroups));setMealPhotoUri(uri);flash('Foto-Entwurf übernommen')}}/>
+  <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <View style={styles.entryHeader}><View style={{flex:1}}><Text style={styles.entryHeaderKicker}>NEUER EINTRAG</Text><Text style={styles.entryHeaderTitle}>{mode==='Symptome'?'Wie geht es dir?':mode==='Auffälligkeit'?'Beobachtung':mode}</Text><Text style={styles.entryHeaderSub}>Wenig tippen, sauber dokumentieren.</Text></View><TouchableOpacity accessibilityLabel="Eintrag schließen" onPress={onDone} style={styles.entryClose}><Text style={styles.entryCloseText}>×</Text></TouchableOpacity></View>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.entryModeScroll}>{availableModes.map(x=><TouchableOpacity key={x} accessibilityRole="button" onPress={()=>{setMode(x);setMore(false)}} style={[styles.entryModeChip,mode===x&&styles.entryModeChipActive]}><Text style={[styles.entryModeChipText,mode===x&&styles.entryModeChipTextActive]}>{x==='Symptome'?'Gefühl':x==='Auffälligkeit'?'Beobachtung':x}</Text></TouchableOpacity>)}</ScrollView>
+    <TimeCard/>{savedMessage?<View style={styles.savedBanner}><Text style={styles.savedBannerText}>✓ {savedMessage}</Text></View>:null}
+
+    {mode==='Essen'&&<><Text style={styles.sectionTitle}>Was hast du gegessen?</Text><View style={styles.pillWrap}>{(['Frühstück','Mittagessen','Abendessen','Snack'] as MealType[]).map(x=><Pill key={x} label={x} active={mealType===x} onPress={()=>setMealType(x)}/>)}</View>
+      <View style={{flexDirection:'row',gap:8}}><TouchableOpacity accessibilityLabel="Lebensmittel suchen" onPress={()=>setFoodSearchOpen(true)} style={[styles.secondaryButton,{flex:1}]}><Text style={styles.secondaryButtonText}>⌕ Suchen</Text></TouchableOpacity><TouchableOpacity accessibilityLabel="Barcode scannen" onPress={openBarcodeCamera} style={[styles.secondaryButton,{flex:1}]}><Text style={styles.secondaryButtonText}>{scannerBusy?'Scanner …':'▦ Barcode'}</Text></TouchableOpacity><TouchableOpacity accessibilityLabel="Mahlzeit fotografieren" onPress={()=>setPhotoOpen(true)} style={[styles.secondaryButton,{flex:1}]}><Text style={styles.secondaryButtonText}>📷 Foto</Text></TouchableOpacity></View>
+      {!!store.savedDishes.length&&<View style={styles.recentFoodBlock}><Text style={styles.recentFoodLabel}>EIGENE GERICHTE</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentFoodScroll}>{store.savedDishes.slice(0,8).map(d=><TouchableOpacity key={d.id} onPress={()=>useDish(d)} onLongPress={()=>Alert.alert('Gericht entfernen?',d.name,[{text:'Abbrechen',style:'cancel'},{text:'Entfernen',style:'destructive',onPress:()=>onRemoveDish(d.id)}])} style={styles.recentFoodChip}><Text style={styles.recentFoodChipText}>♡ {d.name}</Text></TouchableOpacity>)}</ScrollView></View>}
+      {!!favoriteMeals.length&&<View style={styles.recentFoodBlock}><Text style={styles.recentFoodLabel}>FAVORITEN</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentFoodScroll}>{favoriteMeals.map(m=><TouchableOpacity key={m.id} onPress={()=>useMeal(m)} style={styles.recentFoodChip}><Text style={styles.recentFoodChipText}>★ {m.foods.map(x=>x.name).slice(0,2).join(', ')}</Text></TouchableOpacity>)}</ScrollView></View>}
+      {!!recentMeals.length&&<View style={styles.recentFoodBlock}><Text style={styles.recentFoodLabel}>ZULETZT</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentFoodScroll}>{recentMeals.map(m=><TouchableOpacity key={m.id} onPress={()=>useMeal(m)} style={styles.recentFoodChip}><Text style={styles.recentFoodChipText}>↻ {m.foods.map(x=>x.name).slice(0,2).join(', ')}</Text></TouchableOpacity>)}</ScrollView></View>}
+      <ShadowCard><Text style={[styles.cardTitle,{marginBottom:8}]}>Oder schnell manuell</Text><TextInput value={foodName} onChangeText={setFoodName} placeholder="Lebensmittel" placeholderTextColor="#98A19B" style={styles.input}/><TextInput value={foodAmount} onChangeText={setFoodAmount} placeholder="Menge, z. B. 150 g (optional)" placeholderTextColor="#98A19B" style={styles.input}/>{more?<TextInput value={foodKcal} onChangeText={setFoodKcal} placeholder="kcal optional" keyboardType="decimal-pad" style={styles.input}/>:null}<TouchableOpacity onPress={addFood} style={[styles.secondaryButton,!foodName.trim()&&styles.buttonDisabled]} disabled={!foodName.trim()}><Text style={styles.secondaryButtonText}>+ Hinzufügen</Text></TouchableOpacity></ShadowCard>
+      {!!foods.length&&<ShadowCard><Text style={styles.cardTitle}>Mahlzeit</Text>{mealPhotoUri?<Image source={{uri:mealPhotoUri}} style={{height:120,borderRadius:14,marginTop:8}}/>:null}{foods.map((f,i)=><View key={f.id} style={[styles.foodRow,i<foods.length-1&&styles.rowBorder]}><View style={{flex:1}}><Text style={styles.foodName}>{f.name}</Text><Text style={styles.foodDetail}>{f.amount||'ohne Mengenangabe'}{f.brand?` · ${f.brand}`:''}</Text></View><TouchableOpacity accessibilityLabel={`${f.name} entfernen`} onPress={()=>setFoods(c=>c.filter(x=>x.id!==f.id))}><Text style={styles.removeText}>×</Text></TouchableOpacity></View>)}<TouchableOpacity onPress={saveCurrentDish} style={[styles.secondaryButton,{marginTop:8}]}><Text style={styles.secondaryButtonText}>Als eigenes Gericht merken</Text></TouchableOpacity></ShadowCard>}
+      <TouchableOpacity onPress={()=>setMore(v=>!v)}><Text style={styles.link}>{more?'Weniger':'Mehr Angaben'}</Text></TouchableOpacity>{more?<TextInput value={mealNote} onChangeText={setMealNote} placeholder="Optionale Notiz" multiline style={styles.noteInput}/>:null}<TouchableOpacity style={styles.primaryButton} onPress={saveMeal}><Text style={styles.primaryButtonText}>Mahlzeit speichern</Text></TouchableOpacity></>}
+
+    {mode==='Symptome'&&<><Text style={styles.helper}>Nur angeben, was du gerade wirklich bemerkst. Nicht erfasste Werte bleiben leer.</Text>{profile.symptomsToTrack.includes('pain')&&<SeverityPicker title="Bauchschmerzen" value={pain} onChange={setPain}/>} {profile.symptomsToTrack.includes('bloating')&&<SeverityPicker title="Blähungen" value={bloating} onChange={setBloating}/>} {profile.symptomsToTrack.includes('nausea')&&<SeverityPicker title="Übelkeit" value={nausea} onChange={setNausea}/>} {profile.symptomsToTrack.includes('heartburn')&&<SeverityPicker title="Sodbrennen" value={heartburn} onChange={setHeartburn}/>}<TouchableOpacity onPress={()=>setMore(v=>!v)}><Text style={styles.link}>{more?'Weniger':'Mehr: Energie, Stress, Temperatur'}</Text></TouchableOpacity>{more&&<>{profile.tracking.energy?<Counter title="Energie" value={energy} onChange={setEnergy} onClear={()=>setEnergy(undefined)}/>:null}{profile.tracking.stress?<Counter title="Stress" value={stress} onChange={setStress} onClear={()=>setStress(undefined)}/>:null}{profile.tracking.temperature?<TextInput value={temperature} onChangeText={setTemperature} placeholder="Temperatur nur wenn gemessen, z. B. 36,7 °C" keyboardType="decimal-pad" style={styles.input}/>:null}<TextInput value={symptomNote} onChangeText={setSymptomNote} placeholder="Optionale Notiz" multiline style={styles.noteInput}/></>}<TouchableOpacity style={styles.primaryButton} onPress={saveSymptoms}><Text style={styles.primaryButtonText}>Gefühl speichern</Text></TouchableOpacity></>}
+
+    {mode==='Auffälligkeit'&&<><View style={styles.observationHero}><Text style={styles.observationHeroIcon}>!</Text><View style={{flex:1}}><Text style={styles.observationHeroTitle}>Was ist dir aufgefallen?</Text><Text style={styles.observationHeroText}>Ein Satz reicht. Kategorie und Stärke sind optional.</Text></View></View><TextInput value={observationText} onChangeText={setObservationText} placeholder="z. B. Nach dem Latte direkt aufgebläht …" multiline style={styles.observationInput}/><TouchableOpacity onPress={()=>setMore(v=>!v)}><Text style={styles.link}>{more?'Weniger':'Mehr Angaben'}</Text></TouchableOpacity>{more&&<><View style={styles.pillWrap}>{([['food','Essen'],['symptom','Beschwerde'],['cycle','Zyklus'],['body','Körper'],['general','Sonstiges']] as Array<[ObservationCategory,string]>).map(([v,l])=><Pill key={v} label={l} active={observationCategory===v} onPress={()=>setObservationCategory(v)} compact/>)}</View><SeverityPicker title="Wie auffällig?" value={observationSeverity} onChange={setObservationSeverity}/></>}<TouchableOpacity style={styles.primaryButton} onPress={saveObservation}><Text style={styles.primaryButtonText}>Beobachtung speichern</Text></TouchableOpacity></>}
+
+    {mode==='Stuhlgang'&&<><Text style={styles.sectionTitle}>Welche Form passt am ehesten?</Text><View style={styles.bristolGrid}>{[1,2,3,4,5,6,7].map(t=><TouchableOpacity key={t} onPress={()=>setBristolType(t)} style={[styles.bristolCard,bristolType===t&&styles.bristolCardActive]}><Text style={[styles.bristolNumber,bristolType===t&&styles.bristolNumberActive]}>{['●●','●━','━','〰','● ●','≈','≋'][t-1]}</Text><Text style={[styles.bristolText,bristolType===t&&styles.bristolTextActive]}>Typ {t}</Text><Text style={[styles.bristolText,bristolType===t&&styles.bristolTextActive]}>{bristolLabel(t).split('·')[1]?.trim()}</Text></TouchableOpacity>)}</View><TouchableOpacity onPress={()=>setMore(v=>!v)}><Text style={styles.link}>{more?'Weniger':'Mehr: Dringlichkeit & Besonderheiten'}</Text></TouchableOpacity>{more&&<><Counter title="Dringlichkeit" value={urgency} onChange={setUrgency} onClear={()=>setUrgency(undefined)} max={3}/><View style={styles.switchRow}><Text style={styles.cardTitle}>Schleim beobachtet</Text><Switch value={mucus} onValueChange={setMucus}/></View><View style={styles.switchRow}><Text style={styles.cardTitle}>Blut beobachtet</Text><Switch value={blood} onValueChange={setBlood}/></View><SeverityPicker title="Schmerzen dabei" value={bowelPain} onChange={setBowelPain}/><TextInput value={bowelNote} onChangeText={setBowelNote} placeholder="Optionale Notiz" multiline style={styles.noteInput}/></>}<TouchableOpacity style={styles.primaryButton} onPress={saveBowel}><Text style={styles.primaryButtonText}>Stuhlgang speichern</Text></TouchableOpacity></>}
+
+    {mode==='Zyklus'&&<><View style={styles.cycleHero}><Text style={styles.cycleHeroIcon}>◐</Text><View style={{flex:1}}><Text style={styles.cycleHeroKicker}>ZYKLUS</Text><Text style={styles.cycleHeroTitle}>Heute kurz festhalten</Text><Text style={styles.cycleHeroText}>Noura nutzt den Zyklus nur als möglichen Kontext.</Text></View></View><ShadowCard><View style={styles.switchRow}><View><Text style={styles.cardTitle}>Periode / Blutung heute</Text></View><Switch value={cycleBleeding} onValueChange={setCycleBleeding}/></View>{cycleBleeding?<View style={styles.pillWrap}>{(['spotting','light','medium','heavy'] as CycleFlow[]).map(f=><Pill key={f} label={f==='spotting'?'Spotting':f==='light'?'Leicht':f==='medium'?'Mittel':'Stark'} active={cycleFlow===f} onPress={()=>setCycleFlow(f)} compact/>)}</View>:null}</ShadowCard><TouchableOpacity onPress={()=>setMore(v=>!v)}><Text style={styles.link}>{more?'Weniger':'Mehr Symptome & Temperatur'}</Text></TouchableOpacity>{more&&<><SeverityPicker title="Krämpfe" value={cycleCramps} onChange={setCycleCramps}/><SeverityPicker title="Heißhunger" value={cycleCravings} onChange={setCycleCravings}/><SeverityPicker title="Kopfschmerzen" value={cycleHeadache} onChange={setCycleHeadache}/><SeverityPicker title="Brustspannen" value={cycleBreastTenderness} onChange={setCycleBreastTenderness}/><View style={styles.pillWrap}><Pill label="Stimmung niedrig" active={cycleMood==='low'} onPress={()=>setCycleMood('low')} compact/><Pill label="Neutral" active={cycleMood==='neutral'} onPress={()=>setCycleMood('neutral')} compact/><Pill label="Gut" active={cycleMood==='good'} onPress={()=>setCycleMood('good')} compact/></View><TextInput value={cycleBasalTemp} onChangeText={setCycleBasalTemp} placeholder="Basaltemperatur nur wenn gemessen" keyboardType="decimal-pad" style={styles.input}/><TextInput value={cycleNote} onChangeText={setCycleNote} placeholder="Optionale Notiz" multiline style={styles.noteInput}/></>}<TouchableOpacity style={styles.primaryButton} onPress={saveCycle}><Text style={styles.primaryButtonText}>Zyklus speichern</Text></TouchableOpacity></>}
+
+    {mode==='Medikamente'&&<><View style={styles.observationHero}><Text style={styles.observationHeroIcon}>✚</Text><View style={{flex:1}}><Text style={styles.observationHeroTitle}>Medikament oder Supplement</Text><Text style={styles.observationHeroText}>Hilft Noura, mögliche Mitfaktoren nicht mit Essen zu verwechseln.</Text></View></View><View style={styles.pillWrap}><Pill label="Medikament" active={medKind==='medication'} onPress={()=>setMedKind('medication')}/><Pill label="Supplement" active={medKind==='supplement'} onPress={()=>setMedKind('supplement')}/></View><TextInput value={medName} onChangeText={setMedName} placeholder="Name, z. B. Magnesium" style={styles.input}/><TextInput value={medDose} onChangeText={setMedDose} placeholder="Dosis, z. B. 300 mg (optional)" style={styles.input}/><TextInput value={medNote} onChangeText={setMedNote} placeholder="Notiz (optional)" multiline style={styles.noteInput}/><TouchableOpacity style={styles.primaryButton} onPress={saveMedication}><Text style={styles.primaryButtonText}>Speichern</Text></TouchableOpacity></>}
+
+    {mode==='Körperdaten'&&<><View style={styles.observationHero}><Text style={styles.observationHeroIcon}>♡</Text><View style={{flex:1}}><Text style={styles.observationHeroTitle}>Körperdaten</Text><Text style={styles.observationHeroText}>Nur Werte eintragen, die du wirklich gemessen hast.</Text></View></View>{profile.tracking.weight?<TextInput value={metricWeight} onChangeText={setMetricWeight} placeholder="Gewicht in kg" keyboardType="decimal-pad" style={styles.input}/>:null}{profile.tracking.water?<TextInput value={metricWater} onChangeText={setMetricWater} placeholder="Wasser in ml" keyboardType="number-pad" style={styles.input}/>:null}{profile.tracking.sleep?<TextInput value={metricSleep} onChangeText={setMetricSleep} placeholder="Schlaf in Stunden" keyboardType="decimal-pad" style={styles.input}/>:null}{profile.tracking.movement?<TextInput value={metricSteps} onChangeText={setMetricSteps} placeholder="Schritte" keyboardType="number-pad" style={styles.input}/>:null}{profile.tracking.temperature?<TextInput value={metricTemp} onChangeText={setMetricTemp} placeholder="Körpertemperatur in °C" keyboardType="decimal-pad" style={styles.input}/>:null}<TouchableOpacity style={styles.primaryButton} onPress={saveMetrics}><Text style={styles.primaryButtonText}>Körperdaten speichern</Text></TouchableOpacity></>}
+  </ScrollView></>;
+}
+function AnalyseScreen({ store, profile, onOpenAI }: { store:HealthStore; profile:UserProfile; onOpenAI:()=>void }) {
+  const [details,setDetails]=useState(false); const [windowKey,setWindowKey]=useState<'0-5'|'5-10'|'10-24'|'24-48'>('0-5');
+  const window=windowKey==='0-5'?[0,5]:windowKey==='5-10'?[5,10]:windowKey==='10-24'?[10,24]:[24,48];
+  const foodGroups=useMemo(()=>computeFoodGroupSignals(store,window[1],profile.cyclePreferences),[store,windowKey,profile.cyclePreferences]); const foods=useMemo(()=>computeFoodSignalsWindow(store,window[0],window[1],profile.cyclePreferences),[store,windowKey,profile.cyclePreferences]); const cycles=useMemo(()=>computeCycleSymptomSignals(store,profile.cyclePreferences),[store,profile.cyclePreferences]); const combos=useMemo(()=>computeFoodCycleSignals(store,8,profile.cyclePreferences),[store,profile.cyclePreferences]);
+  const top=foodGroups[0]||foods[0]; const topCycle=cycles.find(x=>x.delta>0.3); const recordCount=store.meals.length+store.symptoms.length+store.bowel.length+store.cycle.length+store.observations.length+store.medications.length+store.healthMetrics.length; const quality=getOverallDataQuality(store);
+  return <ScrollView contentContainerStyle={styles.analysisContent} showsVerticalScrollIndicator={false}><View style={styles.analysisHeader}><Text style={styles.analysisPageTitle}>Insights</Text><Text style={styles.analysisPageSub}>Erst die verständliche Aussage. Zahlen nur, wenn du sie sehen möchtest.</Text></View>
+    <TouchableOpacity style={styles.analysisAIHero} onPress={onOpenAI}><View style={styles.analysisAIIcon}><Text style={styles.analysisAIIconText}>✦</Text></View><View style={{flex:1}}><Text style={styles.analysisAIKicker}>NOURA KI</Text><Text style={styles.analysisAITitle}>Deine wichtigsten Muster erklären</Text><Text style={styles.analysisAICopy}>Kurzfassung, Datenlage und nächster sinnvoller Schritt.</Text></View><Text style={styles.quickAIHomeChevron}>›</Text></TouchableOpacity>
+    <View style={styles.insightCard}><Text style={styles.insightCardTitle}>Essen & Beschwerden</Text>{top?<><Text style={[styles.simpleFindingTitle,{marginTop:12}]}>{top.food} fällt momentan häufiger auf</Text><Text style={styles.simpleFindingText}>{top.friendly||`${top.food} war wiederholt zeitnah vor stärkeren Beschwerden dabei.`}</Text><View style={[styles.cleanAIBadge,top.confidence==='höher'?styles.aiConfidenceHigher:top.confidence==='mittel'?styles.aiConfidenceMedium:styles.aiConfidenceLow]}><Text style={styles.cleanAIBadgeText}>Datenlage: {top.confidence}</Text></View></>:<View style={styles.insightEmpty}><Text style={styles.insightEmptyText}>Noch keine belastbare Essens-Auffälligkeit. Das ist völlig normal – wenige gute Einträge sind hilfreicher als viele ungenaue.</Text></View>}
+      <View style={[styles.windowSegment,{marginTop:14}]}>{(['0-5','5-10','10-24','24-48'] as const).map(k=><TouchableOpacity key={k} onPress={()=>setWindowKey(k)} style={[styles.windowButton,windowKey===k&&styles.windowButtonActive]}><Text style={[styles.windowButtonText,windowKey===k&&styles.windowButtonTextActive]}>{k}h</Text></TouchableOpacity>)}</View>
+    </View>
+    {profile.tracking.cycle?<View style={styles.insightCard}><Text style={styles.insightCardTitle}>Zyklus als Kontext</Text>{topCycle?<><Text style={[styles.simpleFindingTitle,{marginTop:12}]}>{topCycle.phase} ist bisher auffälliger</Text><Text style={styles.simpleFindingText}>Deine dokumentierten Beschwerden waren in dieser Phase häufiger stärker als in deinem persönlichen Durchschnitt.</Text></>:<Text style={[styles.simpleFindingText,{marginTop:12}]}>Noch kein stabiles Zyklusmuster. Noura berücksichtigt deine persönliche Zykluslänge und dokumentierte Blutungen.</Text>}{combos[0]?<View style={styles.profileInlineWarning}><Text style={styles.profileInlineWarningText}>{combos[0].food} fällt in der {combos[0].phase} gemeinsam mit Beschwerden auf. Das beweist keine Ursache.</Text></View>:null}</View>:null}
+    {store.healthMetrics.length?<View style={styles.insightCard}><Text style={styles.insightCardTitle}>Apple Health</Text><Text style={[styles.simpleFindingText,{marginTop:10}]}>{store.healthMetrics.length} importierte Gesundheitswerte können als Kontext in deine Auswertung einfließen – z. B. Schlaf, Gewicht, Schritte, Ruhepuls und Temperatur.</Text></View>:null}
+    <TouchableOpacity style={styles.detailsToggle} onPress={()=>setDetails(v=>!v)}><Text style={styles.detailsToggleText}>{details?'Technische Details ausblenden':'Zahlen & Datengrundlage anzeigen'}</Text><Text style={styles.detailsToggleChevron}>{details?'⌃':'⌄'}</Text></TouchableOpacity>
+    {details?<View style={styles.aiDetailsWrap}><View style={styles.aiDetailCard}><Text style={styles.aiDetailTitle}>Datengrundlage</Text><Text style={styles.aiDetailText}>{getTrackingDays(store)} Tracking-Tage · {recordCount} Einträge · Gesamt-Datenlage: {quality.label}.</Text>{top?<><Text style={styles.aiDetailText}>{top.food}: {top.symptomMatches}/{top.occurrences} passende Symptom-Check-ins · {top.counterExamples} Gegenbeispiele · {top.controlSamples} Vergleichs-Check-ins ohne diese Exposition.</Text><Text style={styles.aiDetailText}>Signalabweichung {top.delta.toFixed(1)} · Datenqualität {top.dataQuality}{top.confounders?.length?` · mögliche Mitfaktoren: ${top.confounders.join(', ')}`:''}.</Text></>:null}</View></View>:null}
+    <Text style={styles.disclaimer}>Noura zeigt zeitliche Muster in deinen eigenen Daten. Das ist keine Diagnose und beweist keine Unverträglichkeit.</Text>
+  </ScrollView>;
 }
 
-function Counter({ title, value, onChange, min = 0, max = 10, helper }: {
-  title: string;
-  value: number;
-  onChange: (value: number) => void;
-  min?: number;
-  max?: number;
-  helper?: string;
-}) {
-  return (
-    <ShadowCard>
-      <View style={styles.counterRow}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.counterTitle}>{title}</Text>
-          {!!helper && <Text style={styles.helper}>{helper}</Text>}
-        </View>
-        <View style={styles.stepper}>
-          <TouchableOpacity onPress={() => onChange(Math.max(min, value - 1))} style={styles.stepButton}><Text style={styles.stepButtonText}>−</Text></TouchableOpacity>
-          <Text style={styles.stepValue}>{value}/{max}</Text>
-          <TouchableOpacity onPress={() => onChange(Math.min(max, value + 1))} style={styles.stepButton}><Text style={styles.stepButtonText}>+</Text></TouchableOpacity>
-        </View>
-      </View>
-    </ShadowCard>
-  );
-}
-
-function TrackingScreen({ store, profile, initialMode, onSaveMeal, onSaveSymptom, onSaveBowel, onSaveCycle, onSaveObservation, onDone }: {
-  store: HealthStore;
-  profile: UserProfile;
-  initialMode: TrackingMode;
-  onSaveMeal: (entry: MealEntry) => void;
-  onSaveSymptom: (entry: SymptomEntry) => void;
-  onSaveBowel: (entry: BowelEntry) => void;
-  onSaveCycle: (entry: CycleEntry) => void;
-  onSaveObservation: (entry: ObservationEntry) => void;
-  onDone: () => void;
-}) {
-  const [mode, setMode] = useState<TrackingMode>(initialMode);
-  const availableModes = useMemo<TrackingMode[]>(() => [
-    ...(profile.tracking.meals ? ['Essen' as TrackingMode] : []),
-    ...(profile.tracking.symptoms ? ['Symptome' as TrackingMode] : []),
-    'Auffälligkeit' as TrackingMode,
-    ...(profile.tracking.bowel ? ['Stuhlgang' as TrackingMode] : []),
-    ...(profile.tracking.cycle ? ['Zyklus' as TrackingMode] : []),
-  ], [profile.tracking.meals, profile.tracking.symptoms, profile.tracking.bowel, profile.tracking.cycle]);
-
-  useEffect(() => { setMode(initialMode); }, [initialMode]);
-  useEffect(() => {
-    if (availableModes.length && !availableModes.includes(mode)) setMode(availableModes[0]!);
-  }, [availableModes, mode]);
-  const [savedMessage, setSavedMessage] = useState('');
-
-  const [mealType, setMealType] = useState<MealType>('Frühstück');
-  const [foodName, setFoodName] = useState('');
-  const [foodAmount, setFoodAmount] = useState('');
-  const [foodKcal, setFoodKcal] = useState('');
-  const [foods, setFoods] = useState<FoodItem[]>([]);
-  const [mealNote, setMealNote] = useState('');
-  const [scannerOpen, setScannerOpen] = useState(false);
-  const [scannedCode, setScannedCode] = useState('');
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [scannerBusy, setScannerBusy] = useState(false);
-  const scannerBusyRef = useRef(false);
-  const cameraApi = CameraView as any;
-
-  const [pain, setPain] = useState(0);
-  const [bloating, setBloating] = useState(0);
-  const [nausea, setNausea] = useState(0);
-  const [heartburn, setHeartburn] = useState(0);
-  const [energy, setEnergy] = useState(7);
-  const [stress, setStress] = useState(3);
-  const [temperature, setTemperature] = useState(36.6);
-  const [symptomNote, setSymptomNote] = useState('');
-
-  const [observationText, setObservationText] = useState('');
-  const [observationCategory, setObservationCategory] = useState<ObservationCategory>('general');
-  const [observationSeverity, setObservationSeverity] = useState(3);
-
-  const [bristolType, setBristolType] = useState(4);
-  const [urgency, setUrgency] = useState(1);
-  const [bowelNote, setBowelNote] = useState('');
-
-  const [cycleBleeding, setCycleBleeding] = useState(false);
-  const [cycleFlow, setCycleFlow] = useState<CycleFlow>('medium');
-  const [cycleCramps, setCycleCramps] = useState(0);
-  const [cycleCravings, setCycleCravings] = useState(0);
-  const [cycleHeadache, setCycleHeadache] = useState(0);
-  const [cycleBreastTenderness, setCycleBreastTenderness] = useState(0);
-  const [cycleMood, setCycleMood] = useState<CycleMood>('neutral');
-  const [cycleBasalTemp, setCycleBasalTemp] = useState(36.5);
-  const [cycleNote, setCycleNote] = useState('');
-
-  const recentFoods = useMemo(() => {
-    const seen = new Set<string>();
-    const result: FoodItem[] = [];
-    const meals = store.meals.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    for (const meal of meals) {
-      for (const food of meal.foods) {
-        const key = food.name.trim().toLocaleLowerCase('de-DE');
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        result.push(food);
-        if (result.length >= 8) return result;
-      }
-    }
-    return result;
-  }, [store.meals]);
-
-  useEffect(() => {
-    if (typeof cameraApi.onModernBarcodeScanned !== 'function') return;
-
-    const subscription = cameraApi.onModernBarcodeScanned((event: { data?: string; type?: string }) => {
-      const raw = String(event?.data || '').trim();
-      if (!raw || !scannerBusyRef.current) return;
-
-      // launchScanner() resolves when the native scanner was presented, not when a code
-      // was read. Therefore the scan session must stay active until THIS event arrives.
-      scannerBusyRef.current = false;
-      setScannerBusy(false);
-
-      const clean = raw.replace(/[\s-]+/g, '');
-      const showResult = () => {
-        setScannedCode(clean);
-        setScannerOpen(true);
-      };
-
-      if (Platform.OS === 'ios' && typeof cameraApi.dismissScanner === 'function') {
-        cameraApi.dismissScanner()
-          .catch(() => undefined)
-          .finally(() => setTimeout(showResult, 80));
-      } else {
-        setTimeout(showResult, 80);
-      }
-    });
-
-    return () => subscription?.remove?.();
-  }, []);
-
-  const openBarcodeCamera = async () => {
-    try {
-      // A previous native scanner can have been dismissed without producing an event.
-      // Reset that stale session so the next tap always opens a fresh scanner.
-      if (scannerBusyRef.current) {
-        scannerBusyRef.current = false;
-        if (Platform.OS === 'ios' && typeof cameraApi.dismissScanner === 'function') {
-          await cameraApi.dismissScanner().catch(() => undefined);
-        }
-      }
-
-      let granted = !!cameraPermission?.granted;
-      if (!granted) {
-        const result = await requestCameraPermission();
-        granted = !!result.granted;
-      }
-      if (!granted) {
-        Alert.alert('Kamera nicht freigegeben', 'Bitte erlaube Noura bzw. Expo Go den Kamerazugriff in den iOS-Einstellungen.');
-        return;
-      }
-
-      if (!cameraApi.isModernBarcodeScannerAvailable || typeof cameraApi.launchScanner !== 'function') {
-        setScannedCode('');
-        setScannerOpen(true);
-        return;
-      }
-
-      setScannerOpen(false);
-      setScannedCode('');
-      scannerBusyRef.current = true;
-      setScannerBusy(true);
-
-      // Deliberately do not restrict barcodeTypes here. iOS can visually highlight
-      // additional GTIN/UPC symbologies; filtering them caused a visible code to be
-      // highlighted without emitting the callback on some devices.
-      await cameraApi.launchScanner({
-        isGuidanceEnabled: true,
-        isHighlightingEnabled: true,
-        isPinchToZoomEnabled: true,
-      });
-
-      // Important: do NOT clear scannerBusyRef here. The promise resolves after the
-      // native scanner is presented. onModernBarcodeScanned above ends the session.
-      setScannerBusy(false);
-    } catch (e) {
-      scannerBusyRef.current = false;
-      setScannerBusy(false);
-      Alert.alert(
-        'Scanner konnte nicht geöffnet werden',
-        e instanceof Error ? e.message : 'Der native iPhone-Scanner konnte nicht gestartet werden. Du kannst den Barcode auch manuell eingeben.',
-      );
-      setScannedCode('');
-      setScannerOpen(true);
-    }
-  };
-
-
-  const flashSaved = (message: string) => {
-    setSavedMessage(message);
-    setTimeout(() => setSavedMessage(''), 2200);
-  };
-
-  const addFood = () => {
-    const name = foodName.trim();
-    if (!name) return;
-    const parsed = Number(foodKcal.replace(',', '.'));
-    setFoods(current => [...current, {
-      id: uid('food'),
-      name,
-      amount: foodAmount.trim() || undefined,
-      kcal: Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : undefined,
-      source: 'manual',
-    }]);
-    setFoodName('');
-    setFoodAmount('');
-    setFoodKcal('');
-  };
-
-  const saveMeal = () => {
-    if (!foods.length) {
-      Alert.alert('Noch kein Lebensmittel', 'Füge mindestens ein Lebensmittel zur Mahlzeit hinzu.');
-      return;
-    }
-    onSaveMeal({ id: uid('meal'), createdAt: new Date().toISOString(), mealType, foods, note: mealNote.trim() || undefined });
-    setFoods([]);
-    setMealNote('');
-    flashSaved('Mahlzeit gespeichert');
-    setTimeout(onDone, 220);
-  };
-
-  const saveSymptoms = () => {
-    onSaveSymptom({
-      id: uid('sym'),
-      createdAt: new Date().toISOString(),
-      pain: profile.symptomsToTrack.includes('pain') ? pain : 0,
-      bloating: profile.symptomsToTrack.includes('bloating') ? bloating : 0,
-      nausea: profile.symptomsToTrack.includes('nausea') ? nausea : 0,
-      heartburn: profile.symptomsToTrack.includes('heartburn') ? heartburn : 0,
-      energy: profile.tracking.energy ? energy : 5,
-      stress: profile.tracking.stress ? stress : 5,
-      temperature: profile.tracking.temperature ? temperature : undefined,
-      note: symptomNote.trim() || undefined,
-    });
-    setSymptomNote('');
-    flashSaved('Körper-Check-in gespeichert');
-    setTimeout(onDone, 220);
-  };
-
-  const saveBowel = () => {
-    onSaveBowel({ id: uid('bowel'), createdAt: new Date().toISOString(), bristolType, urgency, note: bowelNote.trim() || undefined });
-    setBowelNote('');
-    flashSaved('Stuhlgang gespeichert');
-    setTimeout(onDone, 220);
-  };
-
-  const saveCycle = () => {
-    onSaveCycle({
-      id: uid('cycle'),
-      createdAt: new Date().toISOString(),
-      bleeding: cycleBleeding,
-      flow: cycleBleeding ? cycleFlow : undefined,
-      cramps: cycleCramps,
-      cravings: cycleCravings,
-      headache: cycleHeadache,
-      breastTenderness: cycleBreastTenderness,
-      mood: cycleMood,
-      basalTemperature: cycleBasalTemp,
-      note: cycleNote.trim() || undefined,
-    });
-    setCycleNote('');
-    flashSaved('Zyklus-Check-in gespeichert');
-    setTimeout(onDone, 220);
-  };
-
-  const saveObservation = () => {
-    if (!observationText.trim()) {
-      Alert.alert('Was ist dir aufgefallen?', 'Schreibe kurz, was du beobachtet hast.');
-      return;
-    }
-    onSaveObservation({
-      id: uid('obs'),
-      createdAt: new Date().toISOString(),
-      text: observationText.trim(),
-      category: observationCategory,
-      severity: observationSeverity,
-    });
-    setObservationText('');
-    flashSaved('Auffälligkeit gespeichert');
-    setTimeout(onDone, 220);
-  };
-
-  return (
-    <>
-      <BarcodeScannerModal
-        visible={scannerOpen}
-        initialCode={scannedCode || undefined}
-        onClose={() => { setScannerOpen(false); setScannedCode(''); }}
-        onScanAgain={() => { setScannerOpen(false); setScannedCode(''); setTimeout(openBarcodeCamera, 220); }}
-        onAdd={food => { setFoods(current => [...current, food]); flashSaved('Barcode-Produkt hinzugefügt'); }}
-      />
-      <ScrollView contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-      <View style={styles.entryHeader}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.entryHeaderKicker}>NEUER EINTRAG</Text>
-          <Text style={styles.entryHeaderTitle}>{mode === 'Symptome' ? 'Wie geht es dir?' : mode}</Text>
-          <Text style={styles.entryHeaderSub}>Nur das Nötigste. Nach dem Speichern landest du direkt im Tagebuch.</Text>
-        </View>
-        <TouchableOpacity onPress={onDone} style={styles.entryClose}><Text style={styles.entryCloseText}>×</Text></TouchableOpacity>
-      </View>
-      {availableModes.length > 1 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.entryModeScroll}>
-          {availableModes.map(x => (
-            <TouchableOpacity key={x} onPress={() => setMode(x)} style={[styles.entryModeChip, mode === x && styles.entryModeChipActive]}>
-              <Text style={[styles.entryModeChipText, mode === x && styles.entryModeChipTextActive]}>{x === 'Symptome' ? 'Gefühl' : x}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      )}
-
-      {!!savedMessage && <View style={styles.savedBanner}><Text style={styles.savedBannerText}>✓ {savedMessage}</Text></View>}
-
-      {mode === 'Essen' && (
-        <>
-          <Text style={styles.sectionTitle}>Mahlzeit</Text>
-          <View style={styles.pillWrap}>
-            {(['Frühstück', 'Mittagessen', 'Abendessen', 'Snack'] as MealType[]).map(x => <Pill key={x} label={x} active={mealType === x} onPress={() => setMealType(x)} />)}
-          </View>
-
-          {!!recentFoods.length && (
-            <View style={styles.recentFoodBlock}>
-              <Text style={styles.recentFoodLabel}>ZULETZT GEGESSEN</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentFoodScroll}>
-                {recentFoods.map(food => (
-                  <TouchableOpacity key={food.id} onPress={() => setFoods(current => [...current, { ...food, id: uid('food') }])} style={styles.recentFoodChip}>
-                    <Text style={styles.recentFoodChipText}>+ {food.name}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
-          )}
-
-          <ShadowCard>
-            <Text style={styles.cardTitle}>Lebensmittel hinzufügen</Text>
-            <Text style={styles.helper}>Scanne verpackte Lebensmittel oder erfasse frische und selbst gekochte Lebensmittel manuell.</Text>
-            <TouchableOpacity onPress={openBarcodeCamera} style={styles.barcodeButton}>
-              <View style={styles.barcodeIcon}><Text style={styles.barcodeIconText}>▦</Text></View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.barcodeTitle}>{scannerBusy ? 'Scanner geöffnet …' : 'Barcode scannen'}</Text>
-                <Text style={styles.barcodeSubtitle}>Barcode auf der Verpackung ins Bild halten</Text>
-              </View>
-              <Text style={styles.barcodeChevron}>›</Text>
-            </TouchableOpacity>
-            <View style={styles.orRow}><View style={styles.orLine} /><Text style={styles.orText}>ODER MANUELL</Text><View style={styles.orLine} /></View>
-            <TextInput value={foodName} onChangeText={setFoodName} placeholder="z. B. Naturjoghurt" placeholderTextColor="#98A19B" style={styles.input} returnKeyType="next" />
-            <View style={styles.twoInputs}>
-              <TextInput value={foodAmount} onChangeText={setFoodAmount} placeholder="Menge, z. B. 150 g" placeholderTextColor="#98A19B" style={[styles.input, { flex: 1 }]} />
-              <TextInput value={foodKcal} onChangeText={setFoodKcal} placeholder="kcal" placeholderTextColor="#98A19B" style={[styles.input, { width: 92 }]} keyboardType="decimal-pad" />
-            </View>
-            <TouchableOpacity onPress={addFood} style={[styles.secondaryButton, !foodName.trim() && styles.buttonDisabled]} disabled={!foodName.trim()}>
-              <Text style={styles.secondaryButtonText}>+ Lebensmittel hinzufügen</Text>
-            </TouchableOpacity>
-          </ShadowCard>
-
-          {!!foods.length && (
-            <ShadowCard>
-              <Text style={styles.cardTitle}>Diese Mahlzeit</Text>
-              {foods.map((item, index) => (
-                <View key={item.id} style={[styles.foodRow, index < foods.length - 1 && styles.rowBorder]}>
-                  <View style={styles.foodBullet}><Text>•</Text></View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.foodName}>{item.name}</Text>
-                    <Text style={styles.foodDetail}>{[item.brand, item.amount, typeof item.kcal === 'number' ? `${item.kcal} kcal` : ''].filter(Boolean).join(' · ') || 'ohne Mengenangabe'}</Text>
-                    {item.source === 'openfoodfacts' && <Text style={styles.foodSource}>▦ Barcode · Open Food Facts{item.allergens?.length ? ` · Allergene: ${item.allergens.join(', ')}` : ''}</Text>}
-                  </View>
-                  <TouchableOpacity onPress={() => setFoods(current => current.filter(x => x.id !== item.id))}><Text style={styles.removeText}>Entfernen</Text></TouchableOpacity>
-                </View>
-              ))}
-            </ShadowCard>
-          )}
-
-          <Text style={styles.sectionTitle}>Notiz</Text>
-          <TextInput value={mealNote} onChangeText={setMealNote} placeholder="z. B. Restaurant, große Portion, sehr fettig …" placeholderTextColor="#98A19B" multiline style={styles.noteInput} />
-          <TouchableOpacity style={styles.primaryButton} onPress={saveMeal}><Text style={styles.primaryButtonText}>Mahlzeit speichern</Text></TouchableOpacity>
-        </>
-      )}
-
-      {mode === 'Symptome' && (
-        <>
-          <View style={styles.infoStrip}><Text style={styles.infoStripText}>Erfasse Beschwerden möglichst dann, wenn sie auftreten. So kann Noura den zeitlichen Abstand zu Mahlzeiten berechnen.</Text></View>
-          {profile.symptomsToTrack.includes('pain') && <Counter title="Bauchschmerzen" value={pain} onChange={setPain} helper="0 = keine · 10 = sehr stark" />}
-          {profile.symptomsToTrack.includes('bloating') && <Counter title="Blähungen" value={bloating} onChange={setBloating} helper="subjektive Stärke" />}
-          {profile.symptomsToTrack.includes('nausea') && <Counter title="Übelkeit" value={nausea} onChange={setNausea} />}
-          {profile.symptomsToTrack.includes('heartburn') && <Counter title="Sodbrennen" value={heartburn} onChange={setHeartburn} />}
-          {profile.tracking.energy && <Counter title="Energie" value={energy} onChange={setEnergy} helper="0 = erschöpft · 10 = sehr energiegeladen" />}
-          {profile.tracking.stress && <Counter title="Stress" value={stress} onChange={setStress} helper="0 = entspannt · 10 = sehr hoch" />}
-
-          {profile.tracking.temperature && <ShadowCard>
-            <View style={styles.counterRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.counterTitle}>Körpertemperatur</Text>
-                <Text style={styles.helper}>Optionaler Messwert</Text>
-              </View>
-              <View style={styles.stepper}>
-                <TouchableOpacity onPress={() => setTemperature(v => Math.max(34, Math.round((v - 0.1) * 10) / 10))} style={styles.stepButton}><Text style={styles.stepButtonText}>−</Text></TouchableOpacity>
-                <Text style={[styles.stepValue, { minWidth: 68 }]}>{temperature.toFixed(1)} °C</Text>
-                <TouchableOpacity onPress={() => setTemperature(v => Math.min(42, Math.round((v + 0.1) * 10) / 10))} style={styles.stepButton}><Text style={styles.stepButtonText}>+</Text></TouchableOpacity>
-              </View>
-            </View>
-          </ShadowCard>}
-
-          <TextInput value={symptomNote} onChangeText={setSymptomNote} placeholder="Optionale Notiz, z. B. nach Sport / wenig Schlaf …" placeholderTextColor="#98A19B" multiline style={styles.noteInput} />
-          <TouchableOpacity style={styles.primaryButton} onPress={saveSymptoms}><Text style={styles.primaryButtonText}>Körper-Check-in speichern</Text></TouchableOpacity>
-        </>
-      )}
-
-      {mode === 'Auffälligkeit' && (
-        <>
-          <View style={styles.observationHero}>
-            <Text style={styles.observationHeroIcon}>!</Text>
-            <View style={{ flex: 1 }}><Text style={styles.observationHeroTitle}>Was ist dir aufgefallen?</Text><Text style={styles.observationHeroText}>Ein Satz reicht. Diese Notizen helfen später, Muster zu verstehen, die in reinen Messwerten fehlen.</Text></View>
-          </View>
-          <TextInput value={observationText} onChangeText={setObservationText} placeholder="z. B. Nach dem Latte direkt aufgebläht …" placeholderTextColor="#9A98A1" multiline style={styles.observationInput} />
-          <Text style={styles.inputLabel}>Kategorie</Text>
-          <View style={styles.pillWrap}>
-            {([['food','Essen'],['symptom','Beschwerde'],['cycle','Zyklus'],['body','Körper'],['general','Sonstiges']] as Array<[ObservationCategory,string]>).map(([value,label]) => <Pill key={value} label={label} active={observationCategory === value} onPress={() => setObservationCategory(value)} compact />)}
-          </View>
-          <Counter title="Wie auffällig?" value={observationSeverity} onChange={setObservationSeverity} helper="0 = kaum · 10 = sehr auffällig" />
-          <TouchableOpacity style={styles.primaryButton} onPress={saveObservation}><Text style={styles.primaryButtonText}>Auffälligkeit speichern</Text></TouchableOpacity>
-        </>
-      )}
-
-      {mode === 'Stuhlgang' && (
-        <>
-          <Text style={styles.sectionTitle}>Bristol-Stuhlformen-Skala</Text>
-          <Text style={styles.helper}>Wähle die Form, die am ehesten passt. Die Skala dient hier nur zur Dokumentation.</Text>
-          <View style={styles.bristolGrid}>
-            {[1, 2, 3, 4, 5, 6, 7].map(type => (
-              <TouchableOpacity key={type} onPress={() => setBristolType(type)} style={[styles.bristolCard, bristolType === type && styles.bristolCardActive]}>
-                <Text style={[styles.bristolNumber, bristolType === type && styles.bristolNumberActive]}>{type}</Text>
-                <Text style={[styles.bristolText, bristolType === type && styles.bristolTextActive]}>{bristolLabel(type).split('·')[1]?.trim()}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <Counter title="Dringlichkeit" value={urgency} onChange={setUrgency} max={3} helper="0 = keine Eile · 3 = sehr dringend" />
-          <TextInput value={bowelNote} onChangeText={setBowelNote} placeholder="Optionale Notiz …" placeholderTextColor="#98A19B" multiline style={styles.noteInput} />
-          <TouchableOpacity style={styles.primaryButton} onPress={saveBowel}><Text style={styles.primaryButtonText}>Stuhlgang speichern</Text></TouchableOpacity>
-        </>
-      )}
-
-      {mode === 'Zyklus' && (
-        <>
-          <View style={styles.cycleHero}>
-            <Text style={styles.cycleHeroIcon}>◐</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cycleHeroKicker}>ZYKLUS-CHECK-IN</Text>
-              <Text style={styles.cycleHeroTitle}>Zyklus als Kontext, nicht als Erklärung für alles.</Text>
-              <Text style={styles.cycleHeroText}>Noura nutzt diese Angaben später als möglichen Einflussfaktor bei Verdauung, Beschwerden, Appetit und Temperatur.</Text>
-            </View>
-          </View>
-
-          <ShadowCard>
-            <Text style={styles.cardTitle}>Periode heute?</Text>
-            <View style={styles.pillRow}>
-              <Pill label="Nein" active={!cycleBleeding} onPress={() => setCycleBleeding(false)} />
-              <Pill label="Ja" active={cycleBleeding} onPress={() => setCycleBleeding(true)} />
-            </View>
-            {cycleBleeding && <>
-              <Text style={[styles.helper, { marginTop: 10 }]}>Blutungsstärke</Text>
-              <View style={styles.pillWrap}>
-                {([['spotting','Spotting'],['light','Leicht'],['medium','Mittel'],['heavy','Stark']] as Array<[CycleFlow,string]>).map(([value,label]) => <Pill key={value} label={label} active={cycleFlow === value} onPress={() => setCycleFlow(value)} compact />)}
-              </View>
-            </>}
-          </ShadowCard>
-
-          <Counter title="Krämpfe / Unterleibsschmerz" value={cycleCramps} onChange={setCycleCramps} helper="0 = keine · 10 = sehr stark" />
-          <Counter title="Heißhunger / Cravings" value={cycleCravings} onChange={setCycleCravings} helper="0 = keine · 10 = sehr stark" />
-          <Counter title="Kopfschmerzen" value={cycleHeadache} onChange={setCycleHeadache} />
-          <Counter title="Brustspannen" value={cycleBreastTenderness} onChange={setCycleBreastTenderness} />
-
-          <ShadowCard>
-            <Text style={styles.cardTitle}>Stimmung</Text>
-            <View style={styles.pillRow}>
-              <Pill label="Eher niedrig" active={cycleMood === 'low'} onPress={() => setCycleMood('low')} />
-              <Pill label="Neutral" active={cycleMood === 'neutral'} onPress={() => setCycleMood('neutral')} />
-              <Pill label="Gut" active={cycleMood === 'good'} onPress={() => setCycleMood('good')} />
-            </View>
-          </ShadowCard>
-
-          <ShadowCard>
-            <View style={styles.counterRow}>
-              <View style={{ flex: 1 }}><Text style={styles.counterTitle}>Basaltemperatur</Text><Text style={styles.helper}>Optional · morgens vor dem Aufstehen gemessen</Text></View>
-              <View style={styles.stepper}>
-                <TouchableOpacity onPress={() => setCycleBasalTemp(v => Math.max(34, Math.round((v - 0.1) * 10) / 10))} style={styles.stepButton}><Text style={styles.stepButtonText}>−</Text></TouchableOpacity>
-                <Text style={[styles.stepValue, { minWidth: 68 }]}>{cycleBasalTemp.toFixed(1)} °C</Text>
-                <TouchableOpacity onPress={() => setCycleBasalTemp(v => Math.min(42, Math.round((v + 0.1) * 10) / 10))} style={styles.stepButton}><Text style={styles.stepButtonText}>+</Text></TouchableOpacity>
-              </View>
-            </View>
-          </ShadowCard>
-
-          <TextInput value={cycleNote} onChangeText={setCycleNote} placeholder="Optionale Notiz, z. B. Eisprung vermutet, Schlaf schlecht …" placeholderTextColor="#98938B" multiline style={styles.noteInput} />
-          <TouchableOpacity style={styles.primaryButton} onPress={saveCycle}><Text style={styles.primaryButtonText}>Zyklus-Check-in speichern</Text></TouchableOpacity>
-        </>
-      )}
-
-    </ScrollView>
-    </>
-  );
-}
-
-function AnalyseScreen({ store, onOpenAI }: { store: HealthStore; onOpenAI: () => void }) {
-  const [windowKey, setWindowKey] = useState<'0-5' | '5-10' | '10-24' | '24-48'>('0-5');
-  const [days, setDays] = useState<7 | 14 | 30 | 180>(14);
-  const window = windowKey === '0-5' ? [0, 5] : windowKey === '5-10' ? [5, 10] : windowKey === '10-24' ? [10, 24] : [24, 48];
-  const signals = useMemo(() => computeFoodSignalsWindow(store, window[0], window[1]), [store, windowKey]);
-  const cycleSignals = useMemo(() => computeCycleSymptomSignals(store), [store]);
-  const foodCycleSignals = useMemo(() => computeFoodCycleSignals(store, 8), [store]);
-  const trends = useMemo(() => buildDailyTrends(store, Math.min(days, 30)), [store, days]);
-  const trackingDays = useMemo(() => getTrackingDays(store), [store]);
-  const recordCount = store.meals.length + store.symptoms.length + store.bowel.length + store.cycle.length + store.observations.length;
-
-  const topSignal = signals[0];
-  const topCycle = cycleSignals[0];
-
-  return (
-    <ScrollView contentContainerStyle={styles.analysisContent} showsVerticalScrollIndicator={false}>
-      <View style={styles.analysisHeader}>
-        <Text style={styles.analysisPageTitle}>Insights</Text>
-        <Text style={styles.analysisPageSub}>Muster aus deinem Tagebuch – verständlich statt technisch.</Text>
-      </View>
-
-      <View style={styles.periodSegment}>
-        {([7,14,30,180] as const).map(value => <TouchableOpacity key={value} onPress={() => setDays(value)} style={[styles.periodButton, days === value && styles.periodButtonActive]}><Text style={[styles.periodButtonText, days === value && styles.periodButtonTextActive]}>{value === 180 ? '6 Monate' : value === 30 ? '1 Monat' : `${value} Tage`}</Text></TouchableOpacity>)}
-      </View>
-
-      <TouchableOpacity style={styles.analysisAIHero} onPress={onOpenAI} activeOpacity={0.9}>
-        <View style={styles.analysisAIIcon}><Text style={styles.analysisAIIconText}>✦</Text></View>
-        <View style={{ flex: 1 }}><Text style={styles.analysisAIKicker}>NOURA KI</Text><Text style={styles.analysisAITitle}>Lass dir deine Muster erklären</Text><Text style={styles.analysisAICopy}>Kurzfassung zuerst. Details nur, wenn du sie öffnen möchtest.</Text></View>
-        <Text style={styles.quickAIHomeChevron}>›</Text>
-      </TouchableOpacity>
-
-      <View style={styles.analysisStats}>
-        <View style={styles.analysisStat}><Text style={styles.analysisStatBig}>{trackingDays}</Text><Text style={styles.analysisStatSmall}>Tracking-Tage</Text></View>
-        <View style={styles.analysisStat}><Text style={styles.analysisStatBig}>{recordCount}</Text><Text style={styles.analysisStatSmall}>Einträge</Text></View>
-        <View style={styles.analysisStat}><Text style={styles.analysisStatBig}>{signals.length + cycleSignals.filter(x => x.delta > 0.3).length}</Text><Text style={styles.analysisStatSmall}>aktuelle Signale</Text></View>
-      </View>
-
-      <View style={styles.insightCard}>
-        <View style={styles.insightCardHeader}>
-          <View style={[styles.insightSquare, { backgroundColor: '#FFE9E3' }]}><Text style={{ color: '#E2674D', fontSize: 20 }}>⌁</Text></View>
-          <View style={{ flex: 1 }}><Text style={styles.insightCardTitle}>Essen → Beschwerden</Text><Text style={styles.insightCardSub}>Wie lange nach einer Mahlzeit?</Text></View>
-        </View>
-        <View style={styles.windowSegment}>
-          {(['0-5','5-10','10-24','24-48'] as const).map(key => <TouchableOpacity key={key} onPress={() => setWindowKey(key)} style={[styles.windowButton, windowKey === key && styles.windowButtonActive]}><Text style={[styles.windowButtonText, windowKey === key && styles.windowButtonTextActive]}>{key}h</Text></TouchableOpacity>)}
-        </View>
-        {topSignal ? (
-          <View style={styles.simpleFinding}>
-            <View style={{ flex: 1 }}><Text style={styles.simpleFindingKicker}>AUFFÄLLIGSTES SIGNAL</Text><Text style={styles.simpleFindingTitle}>{topSignal.food}</Text><Text style={styles.simpleFindingText}>{topSignal.symptomMatches} von {topSignal.occurrences} passenden Mahlzeiten hatten einen Symptom-Eintrag im Fenster {topSignal.windowLabel}.</Text></View>
-            <View style={[styles.simpleDelta, topSignal.confidence === 'höher' ? styles.simpleDeltaGood : topSignal.confidence === 'mittel' ? styles.simpleDeltaMedium : styles.simpleDeltaLow]}><Text style={styles.simpleDeltaValue}>+{topSignal.delta.toFixed(1)}</Text><Text style={styles.simpleDeltaLabel}>vs. Basis</Text></View>
-          </View>
-        ) : <View style={styles.insightEmpty}><Text style={styles.insightEmptyIcon}>!</Text><Text style={styles.insightEmptyText}>Für dieses Zeitfenster gibt es noch kein belastbares Signal. Mehr regelmäßige Einträge helfen.</Text></View>}
-        {signals.slice(1, 4).map(signal => <View key={`${signal.food}-${windowKey}`} style={styles.compactSignalRow}><Text style={styles.compactSignalName}>{signal.food}</Text><Text style={styles.compactSignalMeta}>{signal.symptomMatches}/{signal.occurrences} · +{signal.delta.toFixed(1)}</Text></View>)}
-      </View>
-
-      {store.cycle.length > 0 && (
-        <View style={styles.insightCard}>
-          <View style={styles.insightCardHeader}>
-            <View style={[styles.insightSquare, { backgroundColor: colors.purpleSoft }]}><Text style={{ color: colors.purple, fontSize: 20 }}>◐</Text></View>
-            <View style={{ flex: 1 }}><Text style={styles.insightCardTitle}>Zyklus & Beschwerden</Text><Text style={styles.insightCardSub}>Phase als Kontext für Verdauung und Wohlbefinden</Text></View>
-          </View>
-          {topCycle ? (
-            <View style={styles.simpleFinding}>
-              <View style={{ flex: 1 }}><Text style={styles.simpleFindingKicker}>AKTUELL AUFFÄLLIG</Text><Text style={styles.simpleFindingTitle}>{topCycle.phase}</Text><Text style={styles.simpleFindingText}>{topCycle.samples} Symptom-Check-ins in dieser Phase. Durchschnitt {topCycle.symptomScore.toFixed(1)} gegenüber {topCycle.baseline.toFixed(1)} insgesamt.</Text></View>
-              <View style={styles.simpleDelta}><Text style={styles.simpleDeltaValue}>{topCycle.delta >= 0 ? '+' : ''}{topCycle.delta.toFixed(1)}</Text><Text style={styles.simpleDeltaLabel}>Abweichung</Text></View>
-            </View>
-          ) : <View style={styles.insightEmpty}><Text style={styles.insightEmptyText}>Noch zu wenige Check-ins mit erkennbarem Zykluskontext.</Text></View>}
-          <Text style={styles.signalDisclaimer}>Die Phase wird aus dokumentierten Blutungstagen grob geschätzt. Das ist kein Ovulationsnachweis.</Text>
-        </View>
-      )}
-
-      {foodCycleSignals.length > 0 && (
-        <View style={styles.insightCard}>
-          <View style={styles.insightCardHeader}>
-            <View style={[styles.insightSquare, { backgroundColor: '#FFF6DA' }]}><Text style={{ color: '#A57A18', fontSize: 19 }}>✦</Text></View>
-            <View style={{ flex: 1 }}><Text style={styles.insightCardTitle}>Essen × Zyklus</Text><Text style={styles.insightCardSub}>Phase 3: Kombinationen statt Einzelursachen</Text></View>
-          </View>
-          {foodCycleSignals.slice(0, 4).map(signal => (
-            <View key={`${signal.food}-${signal.phase}`} style={styles.foodCycleRow}>
-              <View style={{ flex: 1 }}><Text style={styles.foodCycleTitle}>{signal.food}</Text><Text style={styles.foodCycleSub}>{signal.phase} · {signal.symptomMatches}/{signal.occurrences} mit Beschwerden</Text></View>
-              <View style={styles.foodCycleBadge}><Text style={styles.foodCycleBadgeText}>+{signal.delta.toFixed(1)}</Text></View>
-            </View>
-          ))}
-          <Text style={styles.signalDisclaimer}>Das Signal zeigt nur, dass beides gemeinsam auffällig war. Es beweist weder eine Unverträglichkeit noch einen Zykluseffekt.</Text>
-        </View>
-      )}
-
-      <View style={styles.insightCard}>
-        <View style={styles.insightCardHeader}>
-          <View style={[styles.insightSquare, { backgroundColor: '#EAF3FA' }]}><Text style={{ color: colors.blue, fontSize: 18 }}>▥</Text></View>
-          <View style={{ flex: 1 }}><Text style={styles.insightCardTitle}>Beschwerden im Verlauf</Text><Text style={styles.insightCardSub}>{days > 30 ? 'Letzte 30 Tage im Diagramm' : `Letzte ${days} Tage`}</Text></View>
-        </View>
-        <View style={styles.trendChart}>
-          {trends.map(day => {
-            const height = Math.max(3, Math.min(100, day.symptomScore * 10));
-            return <View key={day.key} style={styles.trendColumn}><View style={styles.trendTrack}><View style={[styles.trendBar, { height: `${height}%`, backgroundColor: day.bleeding ? colors.purple : '#EF8B72' }]} /></View><Text style={styles.trendLabel}>{day.label}</Text></View>;
-          })}
-        </View>
-      </View>
-
-      <Text style={styles.disclaimer}>Noura sucht zeitliche Zusammenhänge in deinen eigenen Einträgen. Andere Faktoren können dieselben Muster erklären.</Text>
-    </ScrollView>
-  );
-}
-
-function AIScreen({ config, store, consent, scope, initialResult, onConsentChange, onScopeChange, onOpenSettings, onInsight }: {
+function AIScreen({ config, store, profile, consent, scope, initialResult, onConsentChange, onScopeChange, onOpenSettings, onInsight }: {
   config: AIConfig | null;
   store: HealthStore;
+  profile: UserProfile;
   consent: boolean;
   scope: AIDataScope;
   initialResult?: AIHealthInsight | null;
@@ -1064,11 +510,15 @@ function AIScreen({ config, store, consent, scope, initialResult, onConsentChang
   const [result, setResult] = useState<AIHealthInsight | null>(initialResult || null);
   const [error, setError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
+  const [feedback, setFeedback] = useState<'helpful'|'not-helpful'|undefined>();
   const trackingDays = useMemo(() => getTrackingDays(store), [store]);
   const signalCount = useMemo(() => computeFoodSignals(store).length + computeCycleSymptomSignals(store).filter(x => x.delta > 0.3).length, [store]);
-  const recordCount = store.meals.length + store.symptoms.length + store.bowel.length + store.cycle.length + store.observations.length;
+  const recordCount = store.meals.length + store.symptoms.length + store.bowel.length + store.cycle.length + store.observations.length + store.healthMetrics.length;
+  const transmission = useMemo(() => getAITransmissionSummary(store, scope, profile.cyclePreferences), [store, scope, profile.cyclePreferences]);
+  const safetyAlerts = useMemo(() => getMedicalSafetyAlerts(store), [store]);
 
   useEffect(() => { if (initialResult) setResult(initialResult); }, [initialResult]);
+  useEffect(() => { if (!result) { setFeedback(undefined); return; } const key=insightFeedbackKey(result.headline,result.details); loadInsightFeedback(key).then(setFeedback).catch(()=>setFeedback(undefined)); }, [result]);
 
   const runAI = async () => {
     if (!config) return;
@@ -1076,8 +526,9 @@ function AIScreen({ config, store, consent, scope, initialResult, onConsentChang
     setError('');
     setShowDetails(false);
     try {
-      const insight = await generateHealthInsight(config, store, scope);
+      const insight = await generateHealthInsight(config, store, scope, profile.cyclePreferences);
       setResult(insight);
+      setFeedback(undefined);
       onInsight(`${insight.headline}: ${insight.summary}`);
       saveLatestAIInsight(insight, false).catch(() => undefined);
     } catch (e) {
@@ -1116,6 +567,11 @@ function AIScreen({ config, store, consent, scope, initialResult, onConsentChang
             </View>
             {consent && <View style={styles.aiScopeRow}><Pill label="Zusammenfassung" active={scope === 'summary'} onPress={() => onScopeChange('summary')} compact /><Pill label="Detail-Timeline" active={scope === 'detailed'} onPress={() => onScopeChange('detailed')} compact /></View>}
           </View>
+
+
+          {safetyAlerts.length ? <View style={styles.aiSafetyCard}><Text style={styles.aiSafetyIcon}>!</Text><View style={{flex:1}}><Text style={styles.aiSafetyTitle}>{safetyAlerts[0].title}</Text><Text style={styles.aiSafetyText}>{safetyAlerts[0].message} {safetyAlerts[0].action}</Text></View></View> : null}
+
+          {consent && config ? <View style={styles.aiTransmissionCard}><Text style={styles.aiTransmissionTitle}>Vor dem Senden</Text><Text style={styles.aiTransmissionText}>{PROVIDER_META[config.provider].label} · {config.model}</Text><Text style={styles.aiTransmissionText}>{scope==='summary'?'Nur Zusammenfassung':'Begrenzte Detail-Timeline'} · ca. {transmission.approximateKilobytes} KB · {transmission.daysIncluded} Tage</Text><Text style={styles.aiTransmissionSmall}>{transmission.categories.join(' · ')}</Text><Text style={styles.aiTransmissionSmall}>≈ {Math.max(1,Math.round(transmission.approximateKilobytes*256)).toLocaleString('de-DE')} Text-Tokens als grobe Obergrenze · mögliche API-Kosten richten sich nach deinem Anbieter/Modell.</Text></View> : null}
 
           <View style={styles.dataPreview}>
             <View><Text style={styles.dataPreviewBig}>{trackingDays}</Text><Text style={styles.dataPreviewSmall}>Tage</Text></View>
@@ -1182,6 +638,8 @@ function AIScreen({ config, store, consent, scope, initialResult, onConsentChang
 
           {!!result.safetyNote && <View style={styles.aiSafetyCard}><Text style={styles.aiSafetyIcon}>!</Text><View style={{ flex: 1 }}><Text style={styles.aiSafetyTitle}>Gesundheitshinweis</Text><Text style={styles.aiSafetyText}>{result.safetyNote}</Text></View></View>}
 
+          <View style={{backgroundColor:'#FFF',borderWidth:1,borderColor:colors.line,borderRadius:18,padding:13,gap:9}}><Text style={styles.cardTitle}>War dieser Hinweis hilfreich?</Text><View style={{flexDirection:'row',gap:8}}><TouchableOpacity accessibilityRole="button" onPress={()=>{const key=insightFeedbackKey(result.headline,result.details);saveInsightFeedback(key,'helpful').then(()=>setFeedback('helpful')).catch(()=>undefined)}} style={[styles.secondaryButton,{flex:1},feedback==='helpful'&&{backgroundColor:colors.greenSoft,borderColor:'#AED3B6'}]}><Text style={styles.secondaryButtonText}>✓ Hilfreich</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" onPress={()=>{const key=insightFeedbackKey(result.headline,result.details);saveInsightFeedback(key,'not-helpful').then(()=>setFeedback('not-helpful')).catch(()=>undefined)}} style={[styles.secondaryButton,{flex:1},feedback==='not-helpful'&&{backgroundColor:colors.orangeSoft,borderColor:'#EDC49A'}]}><Text style={styles.secondaryButtonText}>Trifft nicht zu</Text></TouchableOpacity></View>{feedback?<Text style={styles.helper}>Danke. Das Feedback bleibt lokal und hilft Noura, Hinweise künftig besser einzuordnen.</Text>:null}</View>
+
           <TouchableOpacity onPress={runAI} disabled={loading} style={styles.secondaryButton}>{loading ? <ActivityIndicator color={colors.purple} /> : <Text style={[styles.secondaryButtonText, { color: colors.purple }]}>Neu auswerten</Text>}</TouchableOpacity>
           <Text style={styles.aiResultFootnote}>KI-Ergebnisse sind Hinweise aus deinen Einträgen und können sich mit neuen Daten verändern. Sie ersetzen keine medizinische Diagnose.</Text>
         </View>
@@ -1201,85 +659,46 @@ function ProfileSettingRow({ icon, title, detail, onPress, right }: { icon: stri
   return onPress ? <TouchableOpacity onPress={onPress} activeOpacity={0.75}>{body}</TouchableOpacity> : body;
 }
 
-function ProfileScreen({ config, store, profile, preferences, aiConsent, onOpenSettings, onEditSetup, onPickProfileImage, onRemoveProfileImage, onToggleBackup, onToggleDailyAI, onBackupNow, onLoadDemo, onClearData }: {
-  config: AIConfig | null;
-  store: HealthStore;
-  profile: UserProfile;
-  preferences: AppPreferences;
-  aiConsent: boolean;
-  onOpenSettings: () => void;
-  onEditSetup: (step: number) => void;
-  onPickProfileImage: () => void;
-  onRemoveProfileImage: () => void;
-  onToggleBackup: (enabled: boolean) => void;
-  onToggleDailyAI: (enabled: boolean) => void;
-  onBackupNow: () => void;
-  onLoadDemo: () => void;
-  onClearData: () => void;
+function ProfileScreen({ config, store, profile, preferences, aiConsent, onOpenSettings, onOpenProfileSettings, onPickProfileImage, onRemoveProfileImage, onToggleBackup, onToggleDailyAI, onToggleAppLock, onBackupNow, onBackupShare, onBackupRestore, onRunAINow, onImportAppleHealth, onSyncAppleHealth, onToggleCloudSync, onCloudSyncNow, onExportData, onImportData, onShowAIUsage, onShowShortcutHelp, onUpdatePreferences, onCreateReport, onClearDiary, onClearAI, onClearEverything }: {
+  config:AIConfig|null; store:HealthStore; profile:UserProfile; preferences:AppPreferences; aiConsent:boolean;
+  onOpenSettings:()=>void; onOpenProfileSettings:()=>void; onPickProfileImage:()=>void; onRemoveProfileImage:()=>void; onToggleBackup:(v:boolean)=>void; onToggleDailyAI:(v:boolean)=>void; onToggleAppLock:(v:boolean)=>void; onBackupNow:()=>void; onBackupShare:()=>void; onBackupRestore:()=>void; onRunAINow:()=>void; onImportAppleHealth:()=>void; onSyncAppleHealth:()=>void; onToggleCloudSync:(v:boolean)=>void; onCloudSyncNow:()=>void; onExportData:()=>void; onImportData:()=>void; onShowAIUsage:()=>void; onShowShortcutHelp:()=>void; onUpdatePreferences:(patch:Partial<AppPreferences>)=>void; onCreateReport:()=>void; onClearDiary:()=>void; onClearAI:()=>void; onClearEverything:()=>void;
 }) {
-  const backupLabel = preferences.lastBackupAt ? `Zuletzt ${new Date(preferences.lastBackupAt).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : 'Noch kein Backup-Snapshot erstellt';
-  const dailyLabel = preferences.lastBackgroundAIAt ? `Letzte automatische Analyse ${new Date(preferences.lastBackgroundAIAt).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : 'Noch keine automatische Analyse';
-  return (
-    <ScrollView contentContainerStyle={styles.profilePageContent} showsVerticalScrollIndicator={false}>
-      <View style={styles.profileTopBar}><View><Text style={styles.profilePageTitle}>Profil</Text><Text style={styles.profilePageSub}>Persönlich, Tracking & Automationen</Text></View></View>
+  const backupLabel=preferences.lastBackupAt?`Zuletzt ${new Date(preferences.lastBackupAt).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}`:'Noch kein Backup erstellt';
+  const dailyLabel=preferences.lastBackgroundAIAt?`Letzte automatische Analyse ${new Date(preferences.lastBackgroundAIAt).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}`:'Noch keine automatische Analyse';
+  const healthLabel=preferences.appleHealthLastImportAt?`${preferences.appleHealthImportedRecords||0} Werte · zuletzt ${new Date(preferences.appleHealthLastImportAt).toLocaleDateString('de-DE')}`:'Noch nichts importiert';
+  const directHealthLabel=preferences.lastDirectHealthSyncAt?`Zuletzt ${new Date(preferences.lastDirectHealthSyncAt).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}`:'Noch nicht direkt synchronisiert';
+  const cloudLabel=preferences.lastCloudSyncAt?`Zuletzt ${new Date(preferences.lastCloudSyncAt).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}`:'Noch nicht synchronisiert';
+  return <ScrollView contentContainerStyle={styles.profilePageContent} showsVerticalScrollIndicator={false}><View style={styles.profileTopBar}><View><Text style={styles.profilePageTitle}>Profil</Text><Text style={styles.profilePageSub}>Deine App, deine Daten, deine Einstellungen.</Text></View></View>
+    <View style={styles.profileHero}><ProfileAvatar profile={profile} size={76}/><View style={{flex:1}}><Text style={styles.profileHeroName}>{profile.displayName||'Dein Profil'}</Text><Text style={styles.profileHeroSub}>{profile.profileImageUri?'Profilbild aktiv':`Initialen: ${getInitials(profile.displayName)}`}</Text><View style={styles.profilePhotoActions}><TouchableOpacity accessibilityRole="button" onPress={onPickProfileImage}><Text style={styles.profilePhotoLink}>{profile.profileImageUri?'Bild ändern':'Profilbild wählen'}</Text></TouchableOpacity>{profile.profileImageUri?<TouchableOpacity accessibilityRole="button" onPress={onRemoveProfileImage}><Text style={styles.profilePhotoRemove}>Entfernen</Text></TouchableOpacity>:null}</View></View></View>
 
-      <View style={styles.profileHero}>
-        <ProfileAvatar profile={profile} size={76} />
-        <View style={{ flex: 1 }}>
-          <Text style={styles.profileHeroName}>{profile.displayName || 'Dein Profil'}</Text>
-          <Text style={styles.profileHeroSub}>{profile.profileImageUri ? 'Profilbild aktiv' : `Initialen: ${getInitials(profile.displayName)}`}</Text>
-          <View style={styles.profilePhotoActions}>
-            <TouchableOpacity onPress={onPickProfileImage}><Text style={styles.profilePhotoLink}>{profile.profileImageUri ? 'Bild ändern' : 'Profilbild wählen'}</Text></TouchableOpacity>
-            {!!profile.profileImageUri && <TouchableOpacity onPress={onRemoveProfileImage}><Text style={styles.profilePhotoRemove}>Entfernen</Text></TouchableOpacity>}
-          </View>
-        </View>
-      </View>
+    <Text style={styles.profileSectionLabel}>PERSÖNLICH & TRACKING</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="◉" title="Persönliche Einstellungen" detail="Name, Ziele, Tracking-Bereiche, Beschwerden & Zyklus" onPress={onOpenProfileSettings}/></View>
 
-      <Text style={styles.profileSectionLabel}>DEINE EINSTELLUNGEN</Text>
-      <View style={styles.profileSettingsCard}>
-        <ProfileSettingRow icon="◉" title="Name & Ziele" detail={`${profile.displayName || 'Kein Name'} · ${profile.goals.length} Ziele`} onPress={() => onEditSetup(1)} />
-        <View style={styles.profileSettingDivider} />
-        <ProfileSettingRow icon="☷" title="Tracking-Bereiche" detail={[profile.tracking.meals && 'Essen', profile.tracking.symptoms && 'Gefühl', profile.tracking.bowel && 'Stuhlgang', profile.tracking.cycle && 'Zyklus'].filter(Boolean).join(' · ')} onPress={() => onEditSetup(2)} />
-        <View style={styles.profileSettingDivider} />
-        <ProfileSettingRow icon="♡" title="Körper-Check-in" detail={`${profile.symptomsToTrack.length} Symptome · ${profile.tracking.temperature ? 'Temperatur · ' : ''}${profile.tracking.energy ? 'Energie · ' : ''}${profile.tracking.stress ? 'Stress' : ''}`.replace(/ · $/, '')} onPress={() => onEditSetup(3)} />
-        <View style={styles.profileSettingDivider} />
-        <ProfileSettingRow icon="◐" title="Zyklus" detail={profile.tracking.cycle ? 'Aktiv und in Analysen einbezogen' : 'Deaktiviert'} onPress={() => onEditSetup(2)} />
-        <View style={styles.profileSettingDivider} />
-        <ProfileSettingRow icon="✓" title="Datenschutz & Hinweise" detail="Freigaben und medizinische Hinweise" onPress={() => onEditSetup(5)} />
-      </View>
+    <Text style={styles.profileSectionLabel}>NOURA KI</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="✦" title="Anbieter & Modell" detail={config?`${PROVIDER_META[config.provider].label} · ${config.model}`:'Noch keine eigene KI verbunden'} onPress={onOpenSettings}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="◎" title="KI-Datennutzung" detail="Welche Analysen liefen, mit welchem Modell und welchem Datenumfang" onPress={onShowAIUsage}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="↻" title="Automatisch regelmäßig analysieren" detail={`${dailyLabel}. Nur wenn neue Daten vorliegen.`} right={<Switch value={preferences.dailyAIEnabled} onValueChange={onToggleDailyAI} trackColor={{true:'#C6B4D8'}} thumbColor={preferences.dailyAIEnabled?colors.purple:undefined}/>}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="▶" title="Jetzt aktualisieren" detail="Analysiert die neuesten Einträge sofort" onPress={onRunAINow}/>{preferences.dailyAIEnabled&&(!config||!aiConsent)?<View style={styles.profileInlineWarning}><Text style={styles.profileInlineWarningText}>Für automatische Analysen brauchst du eine verbundene KI und Datenfreigabe.</Text></View>:null}</View>
 
-      <Text style={styles.profileSectionLabel}>KI</Text>
-      <View style={styles.profileSettingsCard}>
-        <ProfileSettingRow icon="✦" title="Anbieter & Modell" detail={config ? `${PROVIDER_META[config.provider].label} · ${config.model}` : 'Noch keine eigene KI verbunden'} onPress={onOpenSettings} />
-        <View style={styles.profileSettingDivider} />
-        <ProfileSettingRow icon="↻" title="Tägliche automatische KI-Analyse" detail={`${dailyLabel}. iOS entscheidet den tatsächlichen Ausführungszeitpunkt.`} right={<Switch value={preferences.dailyAIEnabled} onValueChange={onToggleDailyAI} trackColor={{ true: '#C6B4D8' }} thumbColor={preferences.dailyAIEnabled ? colors.purple : undefined} />} />
-        {preferences.dailyAIEnabled && (!config || !aiConsent) && <View style={styles.profileInlineWarning}><Text style={styles.profileInlineWarningText}>Für die automatische Analyse brauchst du eine verbundene KI und aktivierte Datenfreigabe.</Text></View>}
-      </View>
+    <Text style={styles.profileSectionLabel}>APPLE HEALTH</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="♥" title="Direkt mit Apple Health synchronisieren" detail={`${directHealthLabel}. ${isDirectHealthKitModulePresent()?'Modul im Build vorhanden.':'In diesem Build nicht enthalten.'}`} onPress={onSyncAppleHealth}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="♡" title="Health-Export importieren" detail={`${healthLabel}. Funktioniert auch mit deinem kostenlosen Sideload-Build.`} onPress={onImportAppleHealth}/><View style={styles.profileInlineWarning}><Text style={styles.profileInlineWarningText}>Noura liest nur die von dir ausgewählten bzw. freigegebenen Daten. Direkter HealthKit-Zugriff funktioniert nur, wenn die App-Signierung die HealthKit-Capability enthält.</Text></View></View>
 
-      <Text style={styles.profileSectionLabel}>BACKUP & DATEN</Text>
-      <View style={styles.profileSettingsCard}>
-        <ProfileSettingRow icon="☁" title="Automatischer iCloud-Gerätebackup-Snapshot" detail={`${backupLabel}. Die Backup-Datei enthält keine API-Keys.`} right={<Switch value={preferences.iCloudBackupEnabled} onValueChange={onToggleBackup} trackColor={{ true: '#B8DCC1' }} thumbColor={preferences.iCloudBackupEnabled ? colors.green : undefined} />} />
-        <View style={styles.profileSettingDivider} />
-        <ProfileSettingRow icon="↓" title="Backup jetzt aktualisieren" detail="Speichert Tagebuch & Profil im Documents-Bereich" onPress={onBackupNow} />
-      </View>
+    <Text style={styles.profileSectionLabel}>ERINNERUNGEN</Text><View style={styles.profileSettingsCard}>
+      <ProfileSettingRow icon="☾" title="Abend-Check-in" detail="Lokale Erinnerung auf dem iPhone." right={<Switch value={preferences.eveningReminderEnabled} onValueChange={v=>onUpdatePreferences({eveningReminderEnabled:v})} trackColor={{true:'#B8DCC1'}}/>}/>
+      {preferences.eveningReminderEnabled?<View style={{paddingHorizontal:14,paddingBottom:12}}><Text style={styles.helper}>Uhrzeit</Text><TextInput accessibilityLabel="Uhrzeit Abend-Check-in" value={preferences.eveningReminderTime} onChangeText={v=>onUpdatePreferences({eveningReminderTime:v})} placeholder="20:30" style={[styles.input,{marginTop:5}]}/></View>:null}
+      <View style={styles.profileSettingDivider}/><ProfileSettingRow icon="◷" title="Nach Mahlzeiten nachfragen" detail={`Optionaler Check-in ${preferences.mealFollowupHours} Std. nach einer gespeicherten Mahlzeit.`} right={<Switch value={preferences.mealFollowupEnabled} onValueChange={v=>onUpdatePreferences({mealFollowupEnabled:v})} trackColor={{true:'#B8DCC1'}}/>}/>
+      {preferences.mealFollowupEnabled?<View style={{paddingHorizontal:14,paddingBottom:12}}><Text style={styles.helper}>Stunden danach (1–8)</Text><TextInput accessibilityLabel="Stunden bis Mahlzeiten-Check-in" value={String(preferences.mealFollowupHours)} onChangeText={v=>onUpdatePreferences({mealFollowupHours:Math.max(1,Math.min(8,Number(v)||3))})} keyboardType="number-pad" style={[styles.input,{marginTop:5}]}/></View>:null}
+      {profile.tracking.cycle?<><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="◐" title="Zyklus-Check-in" detail="Tägliche lokale Erinnerung, wenn du Zyklus trackst." right={<Switch value={preferences.cycleReminderEnabled} onValueChange={v=>onUpdatePreferences({cycleReminderEnabled:v})} trackColor={{true:'#C6B4D8'}}/>}/>{preferences.cycleReminderEnabled?<View style={{paddingHorizontal:14,paddingBottom:12}}><Text style={styles.helper}>Uhrzeit</Text><TextInput accessibilityLabel="Uhrzeit Zyklus-Check-in" value={preferences.cycleReminderTime} onChangeText={v=>onUpdatePreferences({cycleReminderTime:v})} placeholder="19:00" style={[styles.input,{marginTop:5}]}/></View>:null}</>:null}
+      <View style={styles.profileSettingDivider}/><ProfileSettingRow icon="▦" title="Wochenrückblick" detail="Zeigt auf der Startseite eine kurze Zusammenfassung der letzten 7 Tage." right={<Switch value={preferences.weeklyReviewEnabled} onValueChange={v=>onUpdatePreferences({weeklyReviewEnabled:v})} trackColor={{true:'#B8DCC1'}}/>}/>
+    </View>
 
-      <View style={styles.profileStatsCompact}>
-        <View><Text style={styles.profileStatsValue}>{getTrackingDays(store)}</Text><Text style={styles.profileStatsLabel}>Tracking-Tage</Text></View>
-        <View><Text style={styles.profileStatsValue}>{store.meals.length}</Text><Text style={styles.profileStatsLabel}>Mahlzeiten</Text></View>
-        <View><Text style={styles.profileStatsValue}>{store.symptoms.length}</Text><Text style={styles.profileStatsLabel}>Check-ins</Text></View>
-      </View>
+    <Text style={styles.profileSectionLabel}>BERICHT & DATENEXPORT</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="▤" title="Gesundheitsbericht erstellen" detail="Letzte 6 Wochen als übersichtliches PDF – z. B. für einen Arzttermin." onPress={onCreateReport}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="↗" title="Alle Daten exportieren" detail="ZIP mit JSON und CSV-Dateien. API-Keys sind nicht enthalten." onPress={onExportData}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="↙" title="Datenexport importieren" detail="Importiert einen zuvor erzeugten Noura-Export." onPress={onImportData}/></View>
 
-      <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert('Demo-Daten laden?', 'Damit wird dein aktueller lokaler Datenbestand durch Beispieldaten ersetzt.', [
-        { text: 'Abbrechen', style: 'cancel' }, { text: 'Demo laden', onPress: onLoadDemo },
-      ])}><Text style={styles.secondaryButtonText}>Demo-Daten laden</Text></TouchableOpacity>
+    <Text style={styles.profileSectionLabel}>KURZBEFEHLE</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="⌘" title="Siri & Kurzbefehle" detail="Noura erzählen, Mahlzeit oder Beschwerden direkt über einen Noura-Link öffnen." onPress={onShowShortcutHelp}/></View>
 
-      <TouchableOpacity style={styles.destructiveButton} onPress={() => Alert.alert('Alle Trackingdaten löschen?', 'Dieser Vorgang kann in der App nicht rückgängig gemacht werden.', [
-        { text: 'Abbrechen', style: 'cancel' }, { text: 'Alle löschen', style: 'destructive', onPress: onClearData },
-      ])}><Text style={styles.destructiveButtonText}>Alle Trackingdaten löschen</Text></TouchableOpacity>
+    <Text style={styles.profileSectionLabel}>DATENSCHUTZ & SICHERHEIT</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="⌁" title="Face ID / App-Sperre" detail="Schützt Noura beim erneuten Öffnen und verdeckt Inhalte im App-Umschalter." right={<Switch value={preferences.appLockEnabled} onValueChange={onToggleAppLock} trackColor={{true:'#B8DCC1'}} thumbColor={preferences.appLockEnabled?colors.green:undefined}/>}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="▣" title="Lokale Gesundheitsdaten" detail="Tagebuchdaten werden AES-GCM-verschlüsselt auf dem Gerät gespeichert."/></View>
 
-      <Text style={styles.versionLabel}>Noura MVP · Version 0.12</Text>
-    </ScrollView>
-  );
+    <Text style={styles.profileSectionLabel}>BACKUP & ICLOUD</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="☁" title="Backup-Datei automatisch aktualisieren" detail={`${backupLabel}. Für iOS-Gerätebackup geeignet.`} right={<Switch value={preferences.iCloudBackupEnabled} onValueChange={onToggleBackup} trackColor={{true:'#B8DCC1'}} thumbColor={preferences.iCloudBackupEnabled?colors.green:undefined}/>}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="⇄" title="iCloud Live-Sync" detail={`${cloudLabel}. ${isCloudKitModulePresent()?'CloudKit-Modul im Build vorhanden.':'In diesem Build nicht enthalten.'}`} right={<Switch value={preferences.iCloudSyncEnabled} onValueChange={onToggleCloudSync} trackColor={{true:'#B8DCC1'}} thumbColor={preferences.iCloudSyncEnabled?colors.green:undefined}/>}/>{preferences.iCloudSyncEnabled?<><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="↻" title="Jetzt synchronisieren" detail="Führt lokale und iCloud-Daten zusammen und berücksichtigt Löschungen." onPress={onCloudSyncNow}/></>:null}<View style={styles.profileSettingDivider}/><ProfileSettingRow icon="↓" title="Backup jetzt erstellen" detail="Tagebuch, Profilbild und Einstellungen – ohne API-Key" onPress={onBackupNow}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="↗" title="Backup-Datei sichern / teilen" detail="Zum Beispiel in iCloud Drive oder Dateien" onPress={onBackupShare}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="↙" title="Backup wiederherstellen" detail="Wählt eine Noura-Backup-Datei aus" onPress={onBackupRestore}/></View>
+
+    <View style={styles.profileStatsCompact}><View><Text style={styles.profileStatsValue}>{getTrackingDays(store)}</Text><Text style={styles.profileStatsLabel}>Tracking-Tage</Text></View><View><Text style={styles.profileStatsValue}>{store.meals.length}</Text><Text style={styles.profileStatsLabel}>Mahlzeiten</Text></View><View><Text style={styles.profileStatsValue}>{store.healthMetrics.length}</Text><Text style={styles.profileStatsLabel}>Health-Werte</Text></View></View>
+
+    <Text style={styles.profileSectionLabel}>DATEN LÖSCHEN</Text><View style={styles.profileSettingsCard}><ProfileSettingRow icon="×" title="Nur Tagebuch löschen" detail="Profil und KI-Verbindung bleiben erhalten" onPress={()=>Alert.alert('Tagebuch löschen?','Alle Einträge werden lokal entfernt.',[{text:'Abbrechen',style:'cancel'},{text:'Löschen',style:'destructive',onPress:onClearDiary}])}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="✦" title="Nur KI-Verbindung löschen" detail="Entfernt API-Key, Anbieter, Modell, KI-Ergebnisse und Nutzungsprotokoll" onPress={()=>Alert.alert('KI-Verbindung löschen?','Dein Tagebuch bleibt erhalten.',[{text:'Abbrechen',style:'cancel'},{text:'Löschen',style:'destructive',onPress:onClearAI}])}/><View style={styles.profileSettingDivider}/><ProfileSettingRow icon="!" title="Alle Noura-Daten löschen" detail="Tagebuch, Profil, Einstellungen und KI-Verbindung" onPress={()=>Alert.alert('Wirklich alles löschen?','Dieser Vorgang kann nicht rückgängig gemacht werden.',[{text:'Abbrechen',style:'cancel'},{text:'Alles löschen',style:'destructive',onPress:onClearEverything}])}/></View>
+    <Text style={styles.versionLabel}>Noura · Version 0.15</Text>
+  </ScrollView>;
 }
 
 function AISettingsModal({ visible, config, onClose, onSaved }: {
@@ -1299,6 +718,7 @@ function AISettingsModal({ visible, config, onClose, onSaved }: {
   const [modelOptions, setModelOptions] = useState<AIModelOption[]>(FALLBACK_MODEL_OPTIONS.openai);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelSource, setModelSource] = useState<'fallback' | 'live'>('fallback');
+  const [modelView, setModelView] = useState<'recommended' | 'all'>('recommended');
 
   useEffect(() => {
     if (!visible) return;
@@ -1309,6 +729,7 @@ function AISettingsModal({ visible, config, onClose, onSaved }: {
     setBaseUrl(config?.baseUrl ?? PROVIDER_META[nextProvider].defaultBaseUrl ?? '');
     setModelOptions(FALLBACK_MODEL_OPTIONS[nextProvider]);
     setModelSource('fallback');
+    setModelView('recommended');
     setMessage('');
   }, [visible, config]);
 
@@ -1402,7 +823,8 @@ function AISettingsModal({ visible, config, onClose, onSaved }: {
     label: PROVIDER_META[item].label,
     detail: item === 'compatible' ? 'Eigener Gateway / OpenAI-kompatible API' : PROVIDER_META[item].hint,
   }));
-  const modelSelectOptions: SelectOption[] = modelOptions.map(item => ({
+  const visibleModelOptions = modelView === 'recommended' ? modelOptions.filter(item => item.recommended).length ? modelOptions.filter(item => item.recommended) : modelOptions.slice(0, 6) : modelOptions;
+  const modelSelectOptions: SelectOption[] = visibleModelOptions.map(item => ({
     value: item.id,
     label: item.label || item.id,
     detail: item.detail,
@@ -1460,6 +882,7 @@ function AISettingsModal({ visible, config, onClose, onSaved }: {
               onPress={openModels}
               disabled={loadingModels}
             />
+            <View style={styles.windowSegment}><TouchableOpacity onPress={() => setModelView('recommended')} style={[styles.windowButton, modelView === 'recommended' && styles.windowButtonActive]}><Text style={[styles.windowButtonText, modelView === 'recommended' && styles.windowButtonTextActive]}>Empfohlen</Text></TouchableOpacity><TouchableOpacity onPress={() => setModelView('all')} style={[styles.windowButton, modelView === 'all' && styles.windowButtonActive]}><Text style={[styles.windowButtonText, modelView === 'all' && styles.windowButtonTextActive]}>Alle Modelle</Text></TouchableOpacity></View>
 
             <View style={styles.modelToolsRow}>
               <TouchableOpacity onPress={refreshModels} disabled={loadingModels} style={styles.modelRefreshButton}>
@@ -1494,7 +917,7 @@ function AISettingsModal({ visible, config, onClose, onSaved }: {
         <SelectionSheet
           visible={modelPickerOpen}
           title="KI-Modell"
-          subtitle={modelSource === 'live' ? `Alle aktuell für deinen ${PROVIDER_META[provider].label}-Zugang gemeldeten Modelle.` : 'Vorauswahl. Mit API-Key lädt Noura die vollständige Live-Liste.'}
+          subtitle={modelView === 'recommended' ? 'Empfohlene Modelle für Noura. Unter „Alle Modelle“ findest du die vollständige Liste.' : (modelSource === 'live' ? `Alle aktuell für deinen ${PROVIDER_META[provider].label}-Zugang gemeldeten Modelle.` : 'Vorauswahl. Mit API-Key lädt Noura die vollständige Live-Liste.')}
           options={modelSelectOptions}
           selected={model}
           searchable
@@ -1507,300 +930,150 @@ function AISettingsModal({ visible, config, onClose, onSaved }: {
   );
 }
 
-export default function App() {
-  const [tab, setTab] = useState<Tab>('Home');
-  const [store, setStore] = useState<HealthStore>(emptyHealthStore());
-  const [userProfile, setUserProfile] = useState<UserProfile>(createDefaultUserProfile());
-  const [editingSetupStep, setEditingSetupStep] = useState<number | null>(null);
-  const [hydrated, setHydrated] = useState(false);
-  const [aiConfig, setAIConfig] = useState<AIConfig | null>(null);
-  const [aiConsent, setAIConsentState] = useState(false);
-  const [aiScope, setAIScopeState] = useState<AIDataScope>('summary');
-  const [aiSettingsOpen, setAISettingsOpen] = useState(false);
-  const [aiInsight, setAIInsight] = useState('');
-  const [latestAIResult, setLatestAIResult] = useState<AIHealthInsight | null>(null);
-  const [addSheetOpen, setAddSheetOpen] = useState(false);
-  const [quickAIOpen, setQuickAIOpen] = useState(false);
-  const [trackingMode, setTrackingMode] = useState<TrackingMode>('Essen');
-  const [preferences, setPreferences] = useState<AppPreferences>(defaultAppPreferences());
+function NouraApp() {
+  const [tab,setTab]=useState<Tab>('Home');
+  const [store,setStore]=useState<HealthStore>(emptyHealthStore());
+  const [userProfile,setUserProfile]=useState<UserProfile>(createDefaultUserProfile());
+  const [hydrated,setHydrated]=useState(false);
+  const [aiConfig,setAIConfig]=useState<AIConfig|null>(null); const [aiConsent,setAIConsentState]=useState(false); const [aiScope,setAIScopeState]=useState<AIDataScope>('summary'); const [aiSettingsOpen,setAISettingsOpen]=useState(false); const [profileSettingsOpen,setProfileSettingsOpen]=useState(false); const [aiInsight,setAIInsight]=useState(''); const [latestAIResult,setLatestAIResult]=useState<AIHealthInsight|null>(null);
+  const [addSheetOpen,setAddSheetOpen]=useState(false); const [quickAIOpen,setQuickAIOpen]=useState(false); const [trackingMode,setTrackingMode]=useState<TrackingMode>('Essen'); const [preferences,setPreferences]=useState<AppPreferences>(defaultAppPreferences());
+  const [editTarget,setEditTarget]=useState<{kind:Exclude<EntryKind,'metric'>;entry:any}|null>(null);
+  const [undoSnapshot,setUndoSnapshot]=useState<{store:HealthStore;label:string}|null>(null); const undoTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
+  const [privacyCover,setPrivacyCover]=useState(false); const [locked,setLocked]=useState(false); const appStateRef=useRef(AppState.currentState); const cloudTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
 
-  useEffect(() => {
-    Promise.all([loadHealthStore(), loadAIConfig(), loadAIConsent(), loadAIDataScope(), loadUserProfile(), loadAppPreferences(), loadLatestAIInsight()])
-      .then(([health, config, consent, scope, profile, prefs, latest]) => {
-        setStore(health);
-        setAIConfig(config);
-        setAIConsentState(consent);
-        setAIScopeState(scope);
-        setUserProfile(profile);
-        setPreferences(prefs);
-        if (latest?.insight) { setLatestAIResult(latest.insight); setAIInsight(`${latest.insight.headline}: ${latest.insight.summary}`); }
-        syncDailyAIRegistration().catch(() => undefined);
-      })
-      .finally(() => setHydrated(true));
-  }, []);
+  const authenticate=async()=>{try{const available=await LocalAuthentication.hasHardwareAsync();const enrolled=await LocalAuthentication.isEnrolledAsync();if(!available||!enrolled){setLocked(false);Alert.alert('Face ID nicht verfügbar','Auf diesem iPhone ist aktuell keine biometrische Entsperrung eingerichtet.');return false;}const result=await LocalAuthentication.authenticateAsync({promptMessage:'Noura entsperren',cancelLabel:'Abbrechen',fallbackLabel:'Code verwenden'});setLocked(!result.success);setPrivacyCover(!result.success);return result.success;}catch{setLocked(true);return false;}};
 
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', state => {
-      if (state === 'active') {
-        loadLatestAIInsight().then(latest => {
-          if (latest?.insight) { setLatestAIResult(latest.insight); setAIInsight(`${latest.insight.headline}: ${latest.insight.summary}`); }
-        }).catch(() => undefined);
-        loadAppPreferences().then(setPreferences).catch(() => undefined);
-      }
-    });
-    return () => subscription.remove();
-  }, []);
+  useEffect(()=>{Promise.all([loadHealthStore(),loadAIConfig(),loadAIConsent(),loadAIDataScope(),loadUserProfile(),loadAppPreferences(),loadLatestAIInsight()]).then(([health,config,consent,scope,profile,prefs,latest])=>{setStore(health);setAIConfig(config);setAIConsentState(consent);setAIScopeState(scope);setUserProfile(profile);setPreferences(prefs);if(latest?.insight){setLatestAIResult(latest.insight);setAIInsight(`${latest.insight.headline}: ${latest.insight.summary}`);}syncDailyAIRegistration().catch(()=>undefined);syncRecurringReminders(prefs,profile.tracking.cycle).catch(()=>undefined);if(prefs.appLockEnabled){setLocked(true);setTimeout(()=>authenticate(),350);}}).finally(()=>setHydrated(true));},[]);
 
-  const updateBackupStamp = (value: AppPreferences) => {
-    const stamped = { ...value, lastBackupAt: new Date().toISOString() };
-    setPreferences(stamped);
-    saveAppPreferences(stamped).catch(() => undefined);
-  };
+  useEffect(()=>{
+    const openReminderRoute=(route:'symptoms'|'cycle')=>{setAddSheetOpen(false);setTrackingMode(route==='cycle'?'Zyklus':'Symptome');setTab('Tracking');};
+    const sub=addReminderResponseListener(openReminderRoute);
+    getLastReminderRoute().then(route=>{if(route)setTimeout(()=>openReminderRoute(route),450);}).catch(()=>undefined);
+    return()=>sub.remove();
+  },[]);
 
-  const runBackup = async (nextStore: HealthStore = store, nextProfile: UserProfile = userProfile, prefs: AppPreferences = preferences) => {
-    if (!prefs.iCloudBackupEnabled) return;
-    await writeAutomaticBackup(nextStore, nextProfile, prefs);
-    updateBackupStamp(prefs);
-  };
+  useEffect(()=>{
+    const openLink=(url?:string|null)=>{if(!url)return;const action=parseNouraLink(url);if(!action)return;setAddSheetOpen(false);if(action==='tell'){setQuickAIOpen(true);return;}const map:Record<string,TrackingMode>={meal:'Essen',symptoms:'Symptome',bowel:'Stuhlgang',cycle:'Zyklus'};setTrackingMode(map[action]||'Essen');setTab('Tracking');};
+    const sub=Linking.addEventListener('url',event=>openLink(event.url));
+    Linking.getInitialURL().then(openLink).catch(()=>undefined);
+    return()=>sub.remove();
+  },[]);
 
-  const commit = (next: HealthStore) => {
+  useEffect(()=>{const sub=AppState.addEventListener('change',state=>{const previous=appStateRef.current;appStateRef.current=state;if(state!=='active'){setPrivacyCover(true);return;}loadLatestAIInsight().then(latest=>{if(latest?.insight){setLatestAIResult(latest.insight);setAIInsight(`${latest.insight.headline}: ${latest.insight.summary}`);}}).catch(()=>undefined);loadAppPreferences().then(async prefs=>{
+    setPreferences(prefs);
+    if(prefs.iCloudSyncEnabled){
+      try{
+        const [local,profile]=await Promise.all([loadHealthStore(),loadUserProfile()]);
+        const remote=await pullCloudSnapshot();
+        const merged=remote?mergeHealthStores(local,remote.healthStore):local;
+        const mergedProfile=remote?.profile?.completed?{...remote.profile,profileImageUri:profile.profileImageUri||remote.profile.profileImageUri}:profile;
+        setStore(merged);setUserProfile(mergedProfile);
+        await Promise.all([saveHealthStore(merged),saveUserProfile(mergedProfile)]);
+        const pushed=await pushCloudSnapshot(merged,mergedProfile,prefs);
+        const stamped={...prefs,lastCloudSyncAt:pushed.updatedAt};setPreferences(stamped);await saveAppPreferences(stamped);
+      }catch{/* Live sync must never block app opening. Manual sync shows errors. */}
+    }
+    if(prefs.appLockEnabled&&previous!=='active'){setLocked(true);await authenticate();}else setPrivacyCover(false);
+  }).catch(()=>setPrivacyCover(false));});return()=>sub.remove();},[]);
+
+  const persistPrefs=async(next:AppPreferences)=>{setPreferences(next);await saveAppPreferences(next);};
+  const runBackup=async(nextStore=store,nextProfile=userProfile,prefs=preferences)=>{if(!prefs.iCloudBackupEnabled)return;await writeAutomaticBackup(nextStore,nextProfile,prefs);const stamped={...prefs,lastBackupAt:new Date().toISOString()};await persistPrefs(stamped);};
+  const queueCloudPush=(nextStore:HealthStore,nextProfile=userProfile,prefs=preferences)=>{if(!prefs.iCloudSyncEnabled)return;if(cloudTimer.current)clearTimeout(cloudTimer.current);cloudTimer.current=setTimeout(()=>{pushCloudSnapshot(nextStore,nextProfile,prefs).then(async r=>{const latest=await loadAppPreferences();await persistPrefs({...latest,lastCloudSyncAt:r.updatedAt});}).catch(()=>undefined);},1800);};
+  const commit=(next:HealthStore)=>{setStore(next);saveHealthStore(next).catch(()=>Alert.alert('Speichern fehlgeschlagen','Der Eintrag konnte nicht dauerhaft gespeichert werden.'));if(preferences.iCloudBackupEnabled)runBackup(next,userProfile,preferences).catch(()=>undefined);queueCloudPush(next,userProfile,preferences);};
+  const changeConsent=(v:boolean)=>{setAIConsentState(v);saveAIConsent(v).catch(()=>undefined)}; const changeScope=(v:AIDataScope)=>{setAIScopeState(v);saveAIDataScope(v).catch(()=>undefined)};
+  const completeSetup=(profile:UserProfile,connectAI:boolean)=>{setUserProfile(profile);saveUserProfile(profile).catch(()=>undefined);setTab('Home');if(connectAI)setAISettingsOpen(true);};
+  const saveProfileSettings=async(profile:UserProfile)=>{setUserProfile(profile);setProfileSettingsOpen(false);await saveUserProfile(profile);await syncRecurringReminders(preferences,profile.tracking.cycle).catch(()=>undefined);if(preferences.iCloudBackupEnabled)runBackup(store,profile,preferences).catch(()=>undefined);queueCloudPush(store,profile,preferences);};
+  const pickProfileImage=async()=>{try{const uri=await pickAndPersistProfileImage();if(!uri)return;await saveProfileSettings({...userProfile,profileImageUri:uri});}catch(e){Alert.alert('Profilbild nicht geändert',e instanceof Error?e.message:'Bild konnte nicht ausgewählt werden.')}};
+  const removeProfileImage=async()=>{const next={...userProfile,profileImageUri:undefined};setUserProfile(next);await saveUserProfile(next);await removePersistedProfileImage();queueCloudPush(store,next,preferences);};
+  const toggleBackup=async(enabled:boolean)=>{const next={...preferences,iCloudBackupEnabled:enabled};await persistPrefs(next);if(enabled){try{await runBackup(store,userProfile,next);}catch{Alert.alert('Backup fehlgeschlagen','Die Backup-Datei konnte nicht erstellt werden.')}}};
+  const backupNow=async()=>{try{await writeAutomaticBackup(store,userProfile,preferences);await persistPrefs({...preferences,lastBackupAt:new Date().toISOString()});Alert.alert('Backup erstellt','Tagebuch, Profilbild und Einstellungen wurden gesichert. API-Keys sind nicht enthalten.');}catch(e){Alert.alert('Backup fehlgeschlagen',e instanceof Error?e.message:'Unbekannter Fehler')}};
+  const backupShare=async()=>{try{await writeAutomaticBackup(store,userProfile,preferences);await shareAutomaticBackup();}catch(e){Alert.alert('Backup konnte nicht geteilt werden',e instanceof Error?e.message:'Unbekannter Fehler')}};
+  const backupRestore=async()=>{try{const backup=await pickBackupFile();if(!backup)return;Alert.alert('Backup wiederherstellen?',`Backup vom ${new Date(backup.createdAt).toLocaleString('de-DE')} ersetzt den aktuellen lokalen Stand.`,[{text:'Abbrechen',style:'cancel'},{text:'Wiederherstellen',onPress:async()=>{const image=await restoreProfileImageFromBackup(backup);const profile={...backup.profile,profileImageUri:image||backup.profile.profileImageUri};const prefs={...preferences,...backup.preferences,schemaVersion:4 as const,lastBackupAt:new Date().toISOString()};const restoredStore:HealthStore={...emptyHealthStore(),...backup.healthStore,schemaVersion:6,medications:backup.healthStore.medications||[],healthMetrics:backup.healthStore.healthMetrics||[],savedDishes:backup.healthStore.savedDishes||[],deleted:(backup.healthStore as any).deleted||[]};setStore(restoredStore);setUserProfile(profile);setPreferences(prefs);await Promise.all([saveHealthStore(restoredStore),saveUserProfile(profile),saveAppPreferences(prefs)]);await syncDailyAIRegistration().catch(()=>undefined);Alert.alert('Wiederhergestellt','Dein Noura-Backup ist wieder aktiv.');}}]);}catch(e){Alert.alert('Wiederherstellung fehlgeschlagen',e instanceof Error?e.message:'Ungültige Backup-Datei')}};
+  const toggleDailyAI=async(enabled:boolean)=>{const next=await configureDailyAI(enabled);setPreferences(next);if(enabled&&(!aiConfig||!aiConsent))Alert.alert('Noch nicht vollständig','Verbinde eine KI und erlaube die Datenanalyse, damit die automatische Analyse laufen kann.');};
+  const runAINow=async()=>{try{const res=await runAIAnalysisNow(false,true);if(!res.ran){Alert.alert('Keine Analyse möglich',res.reason==='missing-prerequisite'?'Bitte KI verbinden, Datenfreigabe aktivieren und mindestens einen Eintrag anlegen.':'Keine neuen Daten.');return;}if(res.insight){setLatestAIResult(res.insight);setAIInsight(`${res.insight.headline}: ${res.insight.summary}`);setTab('KI');}}catch(e){Alert.alert('KI-Analyse fehlgeschlagen',e instanceof Error?e.message:'Unbekannter Fehler')}};
+  const toggleAppLock=async(enabled:boolean)=>{if(enabled){const ok=await LocalAuthentication.hasHardwareAsync()&&await LocalAuthentication.isEnrolledAsync();if(!ok){Alert.alert('Face ID nicht eingerichtet','Richte Face ID bzw. Biometrie in iOS ein und versuche es erneut.');return;}}const next={...preferences,appLockEnabled:enabled};await persistPrefs(next);if(enabled)await authenticate();};
+  const updatePreferences=async(patch:Partial<AppPreferences>)=>{const next={...preferences,...patch,schemaVersion:4 as const};await persistPrefs(next);try{await syncRecurringReminders(next,userProfile.tracking.cycle);}catch(e){Alert.alert('Erinnerung nicht aktiviert',e instanceof Error?e.message:'Mitteilungen konnten nicht eingerichtet werden.');}};
+  const createReport=async()=>{try{await createAndShareHealthReport(store,userProfile,42);}catch(e){Alert.alert('Bericht konnte nicht erstellt werden',e instanceof Error?e.message:'Unbekannter Fehler');}};
+  const performAppleHealthImport=async()=>{try{const result=await pickAndImportAppleHealth(180);if(!result)return;let next=addHealthMetrics(store,result.metrics);const existing=new Set(next.cycle.map(x=>x.id));next={...next,cycle:[...result.cycle.filter(x=>!existing.has(x.id)),...next.cycle].sort((a,b)=>b.createdAt.localeCompare(a.createdAt))};commit(next);const prefs={...preferences,appleHealthLastImportAt:new Date().toISOString(),appleHealthImportedRecords:result.metrics.length+result.cycle.length};await persistPrefs(prefs);Alert.alert('Apple Health importiert',`${result.metrics.length} Gesundheitswerte und ${result.cycle.length} Zyklus-Einträge wurden übernommen. Doppelte Werte werden beim nächsten Import übersprungen.`);}catch(e){Alert.alert('Apple-Health-Import fehlgeschlagen',e instanceof Error?e.message:'Die Exportdatei konnte nicht gelesen werden.')}};
+  const importAppleHealth=async()=>{Alert.alert('Apple Health importieren','Öffne vorher auf dem iPhone: Health → Profilbild → Alle Gesundheitsdaten exportieren. Wähle danach hier die erzeugte export.zip aus. Noura liest daraus nur passende Werte der letzten 180 Tage.',[{text:'Abbrechen',style:'cancel'},{text:'Export auswählen',onPress:()=>performAppleHealthImport().catch(()=>undefined)}]);};
+
+  const syncAppleHealth=async()=>{try{const result=await syncDirectAppleHealth(180);let next=addHealthMetrics(store,result.metrics);const existing=new Set(next.cycle.map(x=>x.id));next={...next,cycle:[...result.cycle.filter(x=>!existing.has(x.id)),...next.cycle].sort((a,b)=>b.createdAt.localeCompare(a.createdAt))};commit(next);await persistPrefs({...preferences,lastDirectHealthSyncAt:new Date().toISOString()});Alert.alert('Apple Health synchronisiert',`${result.metrics.length} Gesundheitswerte und ${result.cycle.length} Zyklus-Einträge wurden abgeglichen.`);}catch(e){Alert.alert('Direkter Apple-Health-Sync nicht verfügbar',e instanceof Error?e.message:'Dieser Build hat keinen direkten HealthKit-Zugriff. Nutze stattdessen den Health-Exportimport.');}};
+  const syncCloud=async(showResult=true)=>{try{const remote=await pullCloudSnapshot();const merged=remote?mergeHealthStores(store,remote.healthStore):store;const remoteProfile=remote?.profile;const profile=remoteProfile?.completed?{...remoteProfile,profileImageUri:userProfile.profileImageUri||remoteProfile.profileImageUri}:userProfile;setStore(merged);setUserProfile(profile);await Promise.all([saveHealthStore(merged),saveUserProfile(profile)]);const pushed=await pushCloudSnapshot(merged,profile,preferences);await persistPrefs({...preferences,lastCloudSyncAt:pushed.updatedAt});if(showResult)Alert.alert('iCloud synchronisiert','Lokale und iCloud-Daten wurden zusammengeführt. Löschungen werden über Tombstones berücksichtigt.');}catch(e){if(showResult)Alert.alert('iCloud-Sync nicht verfügbar',e instanceof Error?e.message:'Dieser Build ist nicht für CloudKit signiert. Das lokale Backup funktioniert weiterhin.');throw e;}};
+  useEffect(()=>{
+    if(!hydrated || !preferences.iCloudSyncEnabled) return;
+    const timer=setTimeout(()=>{syncCloud(false).catch(()=>undefined);},700);
+    return()=>clearTimeout(timer);
+  },[hydrated,preferences.iCloudSyncEnabled]);
+
+  const toggleCloudSync=async(enabled:boolean)=>{if(!enabled){await persistPrefs({...preferences,iCloudSyncEnabled:false});return;}try{await pushCloudSnapshot(store,userProfile,{...preferences,iCloudSyncEnabled:true});const next={...preferences,iCloudSyncEnabled:true,lastCloudSyncAt:new Date().toISOString()};await persistPrefs(next);Alert.alert('iCloud Live-Sync aktiviert','Noura gleicht Änderungen künftig zusätzlich mit deiner privaten iCloud-Datenbank ab.');}catch(e){await persistPrefs({...preferences,iCloudSyncEnabled:false});Alert.alert('iCloud Live-Sync nicht aktiviert',e instanceof Error?e.message:'Deine aktuelle App-Signierung enthält die benötigte iCloud-Capability nicht.');}};
+  const exportData=async()=>{try{await sharePortableExport(store,userProfile,preferences);}catch(e){Alert.alert('Export fehlgeschlagen',e instanceof Error?e.message:'Die Daten konnten nicht exportiert werden.');}};
+  const importData=async()=>{try{const payload=await pickPortableExport();if(!payload)return;Alert.alert('Daten importieren?','Noura führt den Export mit deinen vorhandenen lokalen Einträgen zusammen. Vorhandene IDs werden anhand des neuesten Änderungszeitpunkts abgeglichen.',[{text:'Abbrechen',style:'cancel'},{text:'Zusammenführen',onPress:async()=>{const incoming={...emptyHealthStore(),...payload.store,schemaVersion:6 as const,deleted:(payload.store as any).deleted||[]};const merged=mergeHealthStores(store,incoming);const profile={...userProfile,...payload.profile,profileImageUri:userProfile.profileImageUri||payload.profile.profileImageUri};commit(merged);setUserProfile(profile);await saveUserProfile(profile);Alert.alert('Import abgeschlossen',`${merged.meals.length} Mahlzeiten und ${merged.symptoms.length} Körper-Check-ins sind jetzt im lokalen Tagebuch.`);}}]);}catch(e){Alert.alert('Import fehlgeschlagen',e instanceof Error?e.message:'Die Exportdatei konnte nicht gelesen werden.');}};
+  const showAIUsage=async()=>{const usage=await loadAIUsage();if(!usage.length){Alert.alert('KI-Datennutzung','Noch keine KI-Anfragen protokolliert. API-Keys werden hier nie gespeichert.');return;}const lines=usage.slice(0,8).map(x=>`${new Date(x.createdAt).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})} · ${usagePurposeLabel(x.purpose)}\n${PROVIDER_META[x.provider]?.label||x.provider} · ${x.model}${x.scope?` · ${x.scope==='summary'?'Zusammenfassung':'Details'}`:''}${x.daysIncluded?` · ${x.daysIncluded} Tage`:''}${x.payloadCharacters?` · ca. ${Math.round(x.payloadCharacters/1024*10)/10}k Zeichen`:''}`).join('\n\n');Alert.alert('KI-Datennutzung',`${lines}\n\nEs werden nur Metadaten zur Anfrage protokolliert, nicht der API-Key.`,[{text:'Schließen'},{text:'Protokoll löschen',style:'destructive',onPress:()=>clearAIUsage().catch(()=>undefined)}]);};
+  const showShortcutHelp=()=>{Alert.alert('Siri & Kurzbefehle','In Apples Kurzbefehle-App kannst du „URL öffnen“ verwenden. Unterstützte Noura-Links:\n\n• noura://tell – Noura erzählen\n• noura://meal – Mahlzeit\n• noura://symptoms – Beschwerden\n• noura://bowel – Stuhlgang\n• noura://cycle – Zyklus\n\nDanach kannst du dem Kurzbefehl einen Siri-Satz geben.');};
+
+  const clearDiary=async()=>{
+    const next=preferences.iCloudSyncEnabled?clearDiaryWithTombstones(store):emptyHealthStore();
     setStore(next);
-    saveHealthStore(next).catch(() => Alert.alert('Speichern fehlgeschlagen', 'Der Eintrag konnte lokal nicht dauerhaft gespeichert werden.'));
-    if (preferences.iCloudBackupEnabled) runBackup(next, userProfile, preferences).catch(() => undefined);
+    await saveHealthStore(next);
+    queueCloudPush(next,userProfile,preferences);
+    setAIInsight('');setLatestAIResult(null);await clearLatestAIInsight();
   };
-
-  const changeConsent = (value: boolean) => {
-    setAIConsentState(value);
-    saveAIConsent(value).catch(() => undefined);
-  };
-
-  const changeScope = (scope: AIDataScope) => {
-    setAIScopeState(scope);
-    saveAIDataScope(scope).catch(() => undefined);
-  };
-
-  const clearAllData = async () => {
-    setStore(emptyHealthStore());
-    setAIInsight('');
-    await clearHealthStore();
-  };
-
-  const loadDemo = () => {
-    const demo = createDemoStore();
-    commit(demo);
-    setTab('Analyse');
-  };
-
-  const completeSetup = (profile: UserProfile, connectAI: boolean) => {
-    const wasEditing = editingSetupStep !== null;
-    setUserProfile(profile);
-    setEditingSetupStep(null);
-    saveUserProfile(profile).catch(() => Alert.alert('Speichern fehlgeschlagen', 'Deine Einrichtung konnte nicht dauerhaft gespeichert werden.'));
-    if (preferences.iCloudBackupEnabled) runBackup(store, profile, preferences).catch(() => undefined);
-    setTab(wasEditing ? 'Profil' : 'Home');
-    if (connectAI) setAISettingsOpen(true);
-  };
-
-  const pickProfileImage = async () => {
-    try {
-      const uri = await pickAndPersistProfileImage();
-      if (!uri) return;
-      const next = { ...userProfile, profileImageUri: uri };
-      setUserProfile(next);
-      await saveUserProfile(next);
-      if (preferences.iCloudBackupEnabled) await runBackup(store, next, preferences);
-    } catch (e) {
-      Alert.alert('Profilbild nicht geändert', e instanceof Error ? e.message : 'Das Bild konnte nicht ausgewählt werden.');
+  const clearAIOnly=async()=>{await clearAIUsage();await clearAIConfig();await saveAIConsent(false);await clearLatestAIInsight();setAIConfig(null);setAIConsentState(false);setLatestAIResult(null);setAIInsight('');};
+  const clearEverything=async()=>{
+    if(preferences.iCloudSyncEnabled){
+      try{
+        const cleared=clearDiaryWithTombstones(store);
+        await pushCloudSnapshot(cleared,createDefaultUserProfile(),{...defaultAppPreferences(),iCloudSyncEnabled:false});
+      }catch{/* Local deletion must still be possible if iCloud is offline. */}
     }
+    await Promise.all([clearHealthStore(),clearHealthEncryptionKey(),clearAIConfig(),clearLatestAIInsight(),clearInsightFeedback(),clearAIUsage(),clearUserProfile(),clearAppPreferences(),removePersistedProfileImage(),saveAIConsent(false),saveAIDataScope('summary')]);
+    setStore(emptyHealthStore());setUserProfile(createDefaultUserProfile());setAIConfig(null);setAIInsight('');setLatestAIResult(null);setPreferences(defaultAppPreferences());setAIConsentState(false);setAIScopeState('summary');await syncDailyAIRegistration().catch(()=>undefined);await syncRecurringReminders(defaultAppPreferences(),false).catch(()=>undefined);
   };
 
-  const removeProfileImage = async () => {
-    const next = { ...userProfile, profileImageUri: undefined };
-    setUserProfile(next);
-    await saveUserProfile(next);
-    await removePersistedProfileImage();
-    if (preferences.iCloudBackupEnabled) runBackup(store, next, preferences).catch(() => undefined);
-  };
+  const openManual=(mode:ManualEntryMode|TrackingMode)=>{setAddSheetOpen(false);setTrackingMode(mode as TrackingMode);setTab('Tracking')}; const openQuickAI=()=>{setAddSheetOpen(false);setQuickAIOpen(true)};
+  const applyQuickDraft=(draft:AIQuickDraft)=>{let next=store;const now=new Date().toISOString();let mealLabel='';if(draft.meal?.foods?.length){mealLabel=draft.meal.foods.map(x=>x.name).slice(0,2).join(', ');next=addMeal(next,{id:uid('meal'),createdAt:now,mealType:draft.meal.mealType,foods:draft.meal.foods.map(food=>enrichFoodGroups({id:uid('food'),name:food.name,amount:food.amount,source:'ai' as const})),note:draft.meal.note});}if(draft.symptom)next=addSymptom(next,{id:uid('sym'),createdAt:now,...draft.symptom});if(draft.bowel)next=addBowel(next,{id:uid('bowel'),createdAt:now,...draft.bowel});if(draft.cycle&&userProfile.tracking.cycle)next=addCycle(next,{id:uid('cycle'),createdAt:now,...draft.cycle});if(draft.observation?.text.trim())next=addObservation(next,{id:uid('obs'),createdAt:now,...draft.observation,text:draft.observation.text.trim()});if(draft.medications?.length&&userProfile.tracking.medications){for(const m of draft.medications)next=addMedication(next,{id:uid('med'),createdAt:now,kind:m.kind,name:m.name,dose:m.dose,note:m.note});}commit(next);if(mealLabel)scheduleMealFollowup(preferences,mealLabel).catch(()=>undefined);setTab('Diary');};
+  const openEntry=(item:TimelineItem)=>{if(item.kind==='metric')return;const entry=findEntry(store,item.kind,item.id);if(entry)setEditTarget({kind:item.kind,entry});};
+  const saveEdited=(kind:Exclude<EntryKind,'metric'>,entry:any)=>{commit(updateEntry(store,kind,entry));setEditTarget(null);};
+  const deleteEdited=(kind:Exclude<EntryKind,'metric'>,id:string)=>{if(undoTimer.current)clearTimeout(undoTimer.current);const before=store;commit(removeEntry(store,kind,id));setEditTarget(null);setUndoSnapshot({store:before,label:'Eintrag gelöscht'});undoTimer.current=setTimeout(()=>setUndoSnapshot(null),6000);};
+  const undoDelete=()=>{if(!undoSnapshot)return;commit(undoSnapshot.store);setUndoSnapshot(null);if(undoTimer.current)clearTimeout(undoTimer.current);};
+  const duplicateMeal=(meal:MealEntry)=>{const copy={...meal,id:uid('meal'),createdAt:new Date().toISOString(),favorite:false,foods:meal.foods.map(f=>({...f,id:uid('food')}))};commit(addMeal(store,copy));setEditTarget(null);setTab('Diary');};
 
-  const toggleBackup = async (enabled: boolean) => {
-    const next = { ...preferences, iCloudBackupEnabled: enabled };
-    setPreferences(next);
-    await saveAppPreferences(next);
-    if (enabled) {
-      try { await writeAutomaticBackup(store, userProfile, next); updateBackupStamp(next); }
-      catch { Alert.alert('Backup konnte nicht erstellt werden', 'Noura konnte die lokale Backup-Datei nicht aktualisieren.'); }
-    }
-  };
+  if(!hydrated)return <SafeAreaView style={[styles.safe,styles.loadingScreen]}><StatusBar barStyle="dark-content" backgroundColor={colors.bg}/><Image source={require('./assets/icon.png')} style={{width:82,height:82,borderRadius:20}}/><ActivityIndicator color={colors.purple}/></SafeAreaView>;
+  if(!userProfile.completed)return <SetupWizard initialProfile={userProfile} editing={false} onComplete={completeSetup}/>;
 
-  const backupNow = async () => {
-    try {
-      await writeAutomaticBackup(store, userProfile, preferences);
-      updateBackupStamp(preferences);
-      Alert.alert('Backup aktualisiert', 'Noura hat einen aktuellen Backup-Snapshot im Documents-Bereich gespeichert. iOS kann diesen über das Gerätebackup in iCloud sichern.');
-    } catch {
-      Alert.alert('Backup fehlgeschlagen', 'Der Backup-Snapshot konnte nicht gespeichert werden.');
-    }
-  };
-
-  const toggleDailyAI = async (enabled: boolean) => {
-    const next = await configureDailyAI(enabled);
-    setPreferences(next);
-    if (enabled && (!aiConfig || !aiConsent)) {
-      Alert.alert('Automatische KI vorbereitet', 'Aktiviere zusätzlich eine KI-Verbindung und die Datenfreigabe. Erst dann kann Noura im Hintergrund analysieren.');
-    }
-  };
-
-  const openManual = (mode: ManualEntryMode | TrackingMode) => {
-    setAddSheetOpen(false);
-    setTrackingMode(mode as TrackingMode);
-    setTab('Tracking');
-  };
-
-  const openQuickAI = () => {
-    setAddSheetOpen(false);
-    setQuickAIOpen(true);
-  };
-
-  const applyQuickDraft = (draft: AIQuickDraft) => {
-    let next = store;
-    const now = new Date().toISOString();
-    if (draft.meal?.foods?.length) {
-      next = addMeal(next, {
-        id: uid('meal'),
-        createdAt: now,
-        mealType: draft.meal.mealType,
-        foods: draft.meal.foods.map(food => ({ id: uid('food'), name: food.name, amount: food.amount, source: 'ai' as const })),
-        note: draft.meal.note,
-      });
-    }
-    if (draft.symptom) {
-      next = addSymptom(next, { id: uid('sym'), createdAt: now, ...draft.symptom });
-    }
-    if (draft.bowel) {
-      next = addBowel(next, { id: uid('bowel'), createdAt: now, ...draft.bowel });
-    }
-    if (draft.cycle && userProfile.tracking.cycle) {
-      next = addCycle(next, { id: uid('cycle'), createdAt: now, ...draft.cycle });
-    }
-    if (draft.observation?.text.trim()) {
-      next = addObservation(next, { id: uid('obs'), createdAt: now, ...draft.observation, text: draft.observation.text.trim() });
-    }
-    commit(next);
-    setTab('Diary');
-  };
-
-  if (!hydrated) {
-    return (
-      <SafeAreaView style={[styles.safe, styles.loadingScreen]}>
-        <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
-        <Text style={[styles.loadingLogo, { color: colors.purple }]}>Noura</Text>
-        <ActivityIndicator color={colors.purple} />
-      </SafeAreaView>
-    );
-  }
-
-  if (!userProfile.completed || editingSetupStep !== null) {
-    const editing = editingSetupStep !== null;
-    return <SetupWizard initialProfile={userProfile} editing={editing} startStep={editingSetupStep ?? undefined} onCancel={editing ? () => setEditingSetupStep(null) : undefined} onComplete={completeSetup} />;
-  }
-
-  const screen = tab === 'Home'
-    ? <HomeScreen
-        store={store}
-        profile={userProfile}
-        aiInsight={aiInsight}
-        onAIQuick={openQuickAI}
-        onAdd={openManual}
-        onOpenInsights={() => setTab('KI')}
-        onDiary={() => setTab('Diary')}
-        onProfile={() => setTab('Profil')}
-      />
-    : tab === 'Diary'
-      ? <DiaryScreen store={store} onDelete={(kind, id) => commit(removeEntry(store, kind, id))} onAdd={() => setAddSheetOpen(true)} />
-    : tab === 'Tracking'
-      ? <TrackingScreen
-          store={store}
-          profile={userProfile}
-          initialMode={trackingMode}
-          onSaveMeal={entry => commit(addMeal(store, entry))}
-          onSaveSymptom={entry => commit(addSymptom(store, entry))}
-          onSaveBowel={entry => commit(addBowel(store, entry))}
-          onSaveCycle={entry => commit(addCycle(store, entry))}
-          onSaveObservation={entry => commit(addObservation(store, entry))}
-          onDone={() => setTab('Diary')}
-        />
-    : tab === 'Analyse'
-      ? <AnalyseScreen store={store} onOpenAI={() => setTab('KI')} />
-    : tab === 'KI'
-      ? <AIScreen
-          config={aiConfig}
-          store={store}
-          consent={aiConsent}
-          scope={aiScope}
-          initialResult={latestAIResult}
-          onConsentChange={changeConsent}
-          onScopeChange={changeScope}
-          onOpenSettings={() => setAISettingsOpen(true)}
-          onInsight={setAIInsight}
-        />
-      : <ProfileScreen
-          config={aiConfig}
-          store={store}
-          profile={userProfile}
-          preferences={preferences}
-          aiConsent={aiConsent}
-          onOpenSettings={() => setAISettingsOpen(true)}
-          onEditSetup={step => setEditingSetupStep(step)}
-          onPickProfileImage={pickProfileImage}
-          onRemoveProfileImage={removeProfileImage}
-          onToggleBackup={enabled => { toggleBackup(enabled).catch(() => undefined); }}
-          onToggleDailyAI={enabled => { toggleDailyAI(enabled).catch(() => undefined); }}
-          onBackupNow={() => { backupNow().catch(() => undefined); }}
-          onLoadDemo={loadDemo}
-          onClearData={clearAllData}
-        />;
-
-  const navItems: Array<{ tab: Tab; icon: string; label: string }> = [
-    { tab: 'Home', icon: '▣', label: 'Heute' },
-    { tab: 'Diary', icon: '≡', label: 'Tagebuch' },
-    { tab: 'Analyse', icon: '▥', label: 'Insights' },
-    { tab: 'Profil', icon: '☷', label: 'Profil' },
-  ];
-
-  return (
-    <SafeAreaView style={styles.safe}>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
-      <View style={styles.app}>{screen}</View>
-
-      {tab !== 'Tracking' && (
-        <View style={styles.bottomNavWrap}>
-          <View style={styles.bottomNav}>
-            {navItems.slice(0, 2).map(item => {
-              const active = tab === item.tab;
-              return <TouchableOpacity key={item.tab} style={styles.bottomNavButton} onPress={() => setTab(item.tab)}><View style={[styles.bottomNavIconBox, active && styles.bottomNavIconBoxActive]}><Text style={[styles.bottomNavIcon, active && styles.bottomNavIconActive]}>{item.icon}</Text></View><Text style={[styles.bottomNavLabel, active && styles.bottomNavLabelActive]}>{item.label}</Text></TouchableOpacity>;
-            })}
-            <View style={styles.bottomNavCenterSpace} />
-            {navItems.slice(2).map(item => {
-              const active = item.tab === 'Analyse' ? tab === 'Analyse' || tab === 'KI' : tab === item.tab;
-              return <TouchableOpacity key={item.tab} style={styles.bottomNavButton} onPress={() => setTab(item.tab)}><View style={[styles.bottomNavIconBox, active && styles.bottomNavIconBoxActive]}><Text style={[styles.bottomNavIcon, active && styles.bottomNavIconActive]}>{item.icon}</Text></View><Text style={[styles.bottomNavLabel, active && styles.bottomNavLabelActive]}>{item.label}</Text></TouchableOpacity>;
-            })}
-          </View>
-          <TouchableOpacity style={styles.floatingAdd} onPress={() => setAddSheetOpen(true)} activeOpacity={0.88}><Text style={styles.floatingAddText}>＋</Text></TouchableOpacity>
-        </View>
-      )}
-
-      <AddEntrySheet visible={addSheetOpen} cycleEnabled={userProfile.tracking.cycle} onClose={() => setAddSheetOpen(false)} onAI={openQuickAI} onManual={openManual} />
-      <AIQuickCaptureModal
-        visible={quickAIOpen}
-        config={aiConfig}
-        onClose={() => setQuickAIOpen(false)}
-        onOpenAISettings={() => { setQuickAIOpen(false); setAISettingsOpen(true); }}
-        onConfirm={applyQuickDraft}
-      />
-      <AISettingsModal visible={aiSettingsOpen} config={aiConfig} onClose={() => setAISettingsOpen(false)} onSaved={setAIConfig} />
-    </SafeAreaView>
-  );
+  const saveMealWithFollowup=(e:MealEntry)=>{commit(addMeal(store,e));scheduleMealFollowup(preferences,e.foods.map(x=>x.name).slice(0,2).join(', ')).catch(()=>undefined);};
+  const bodyDataEnabled=userProfile.tracking.weight||userProfile.tracking.water||userProfile.tracking.sleep||userProfile.tracking.movement||userProfile.tracking.temperature;
+  const screen=tab==='Home'?<HomeScreen store={store} profile={userProfile} preferences={preferences} aiInsight={aiInsight} onAIQuick={openQuickAI} onAdd={openManual} onOpenInsights={()=>setTab('KI')} onDiary={()=>setTab('Diary')} onProfile={()=>setTab('Profil')}/>:tab==='Diary'?<DiaryScreen store={store} onOpenEntry={openEntry}/>:tab==='Tracking'?<TrackingScreen store={store} profile={userProfile} aiConfig={aiConfig} initialMode={trackingMode} onSaveMeal={saveMealWithFollowup} onSaveSymptom={e=>commit(addSymptom(store,e))} onSaveBowel={e=>commit(addBowel(store,e))} onSaveCycle={e=>commit(addCycle(store,e))} onSaveObservation={e=>commit(addObservation(store,e))} onSaveMedication={e=>commit(addMedication(store,e))} onSaveMetrics={entries=>commit(addHealthMetrics(store,entries))} onSaveDish={dish=>commit(saveDish(store,dish))} onRemoveDish={id=>commit(removeDish(store,id))} onDone={()=>setTab('Diary')}/>:tab==='Analyse'?<AnalyseScreen store={store} profile={userProfile} onOpenAI={()=>setTab('KI')}/>:tab==='KI'?<AIScreen config={aiConfig} store={store} profile={userProfile} consent={aiConsent} scope={aiScope} initialResult={latestAIResult} onConsentChange={changeConsent} onScopeChange={changeScope} onOpenSettings={()=>setAISettingsOpen(true)} onInsight={setAIInsight}/>:<ProfileScreen config={aiConfig} store={store} profile={userProfile} preferences={preferences} aiConsent={aiConsent} onOpenSettings={()=>setAISettingsOpen(true)} onOpenProfileSettings={()=>setProfileSettingsOpen(true)} onPickProfileImage={pickProfileImage} onRemoveProfileImage={removeProfileImage} onToggleBackup={v=>toggleBackup(v).catch(()=>undefined)} onToggleDailyAI={v=>toggleDailyAI(v).catch(()=>undefined)} onToggleAppLock={v=>toggleAppLock(v).catch(()=>undefined)} onBackupNow={()=>backupNow().catch(()=>undefined)} onBackupShare={()=>backupShare().catch(()=>undefined)} onBackupRestore={()=>backupRestore().catch(()=>undefined)} onRunAINow={()=>runAINow().catch(()=>undefined)} onImportAppleHealth={()=>importAppleHealth().catch(()=>undefined)} onSyncAppleHealth={()=>syncAppleHealth().catch(()=>undefined)} onToggleCloudSync={v=>toggleCloudSync(v).catch(()=>undefined)} onCloudSyncNow={()=>syncCloud(true).catch(()=>undefined)} onExportData={()=>exportData().catch(()=>undefined)} onImportData={()=>importData().catch(()=>undefined)} onShowAIUsage={()=>showAIUsage().catch(()=>undefined)} onShowShortcutHelp={showShortcutHelp} onUpdatePreferences={patch=>updatePreferences(patch).catch(()=>undefined)} onCreateReport={()=>createReport().catch(()=>undefined)} onClearDiary={()=>clearDiary().catch(()=>undefined)} onClearAI={()=>clearAIOnly().catch(()=>undefined)} onClearEverything={()=>clearEverything().catch(()=>undefined)}/>;
+  const navItems:Array<{tab:Tab;icon:string;label:string}>=[{tab:'Home',icon:'▣',label:'Heute'},{tab:'Diary',icon:'≡',label:'Tagebuch'},{tab:'Analyse',icon:'▥',label:'Insights'},{tab:'Profil',icon:'☷',label:'Profil'}];
+  return <SafeAreaView style={styles.safe}><StatusBar barStyle="dark-content" backgroundColor={colors.bg}/><View style={styles.app}>{screen}</View>{tab!=='Tracking'?<View style={styles.bottomNavWrap}><View style={styles.bottomNav}>{navItems.slice(0,2).map(item=>{const active=tab===item.tab;return <TouchableOpacity key={item.tab} style={styles.bottomNavButton} onPress={()=>setTab(item.tab)}><View style={[styles.bottomNavIconBox,active&&styles.bottomNavIconBoxActive]}><Text style={[styles.bottomNavIcon,active&&styles.bottomNavIconActive]}>{item.icon}</Text></View><Text style={[styles.bottomNavLabel,active&&styles.bottomNavLabelActive]}>{item.label}</Text></TouchableOpacity>})}<View style={styles.bottomNavCenterSpace}/>{navItems.slice(2).map(item=>{const active=item.tab==='Analyse'?tab==='Analyse'||tab==='KI':tab===item.tab;return <TouchableOpacity key={item.tab} style={styles.bottomNavButton} onPress={()=>setTab(item.tab)}><View style={[styles.bottomNavIconBox,active&&styles.bottomNavIconBoxActive]}><Text style={[styles.bottomNavIcon,active&&styles.bottomNavIconActive]}>{item.icon}</Text></View><Text style={[styles.bottomNavLabel,active&&styles.bottomNavLabelActive]}>{item.label}</Text></TouchableOpacity>})}</View><TouchableOpacity style={styles.floatingAdd} onPress={()=>setAddSheetOpen(true)}><Text style={styles.floatingAddText}>＋</Text></TouchableOpacity></View>:null}
+    <AddEntrySheet visible={addSheetOpen} cycleEnabled={userProfile.tracking.cycle} medicationsEnabled={userProfile.tracking.medications} bodyDataEnabled={bodyDataEnabled} onClose={()=>setAddSheetOpen(false)} onAI={openQuickAI} onManual={openManual}/>
+    <AIQuickCaptureModal visible={quickAIOpen} config={aiConfig} onClose={()=>setQuickAIOpen(false)} onOpenAISettings={()=>{setQuickAIOpen(false);setAISettingsOpen(true)}} onConfirm={applyQuickDraft}/>
+    <AISettingsModal visible={aiSettingsOpen} config={aiConfig} onClose={()=>setAISettingsOpen(false)} onSaved={setAIConfig}/>
+    <ProfileSettingsModal visible={profileSettingsOpen} profile={userProfile} onClose={()=>setProfileSettingsOpen(false)} onSave={saveProfileSettings}/>
+    <EntryEditorModal visible={!!editTarget} kind={editTarget?.kind} entry={editTarget?.entry} onClose={()=>setEditTarget(null)} onSave={saveEdited} onDelete={deleteEdited} onDuplicateMeal={duplicateMeal}/>
+    {undoSnapshot?<View style={{position:'absolute',left:18,right:18,bottom:104,backgroundColor:'#2D2A31',borderRadius:16,paddingHorizontal:14,paddingVertical:12,flexDirection:'row',alignItems:'center',gap:12,zIndex:50}}><Text style={{color:'#FFF',flex:1,fontWeight:'700'}}>{undoSnapshot.label}</Text><TouchableOpacity onPress={undoDelete}><Text style={{color:'#D9C7EA',fontWeight:'900'}}>Rückgängig</Text></TouchableOpacity></View>:null}
+    {(privacyCover||locked)?<View style={styles.privacyCover}><Image source={require('./assets/icon.png')} style={{width:76,height:76,borderRadius:20}}/><Text style={styles.privacyCoverTitle}>Noura ist geschützt</Text>{locked?<TouchableOpacity style={styles.primaryButton} onPress={authenticate}><Text style={styles.primaryButtonText}>Mit Face ID entsperren</Text></TouchableOpacity>:null}</View>:null}
+  </SafeAreaView>;
 }
+
+class AppErrorBoundary extends React.Component<{children:React.ReactNode},{error:Error|null}> {
+  state:{error:Error|null}={error:null};
+  static getDerivedStateFromError(error:Error){return {error};}
+  componentDidCatch(error:Error){console.error('Noura UI error',error);}
+  render(){
+    if(this.state.error){
+      return <SafeAreaView style={{flex:1,backgroundColor:'#F7F7F9',alignItems:'center',justifyContent:'center',padding:28,gap:14}}>
+        <Image source={require('./assets/icon.png')} style={{width:72,height:72,borderRadius:18}}/>
+        <Text style={{fontSize:20,fontWeight:'900',color:'#242329',textAlign:'center'}}>Noura konnte diese Ansicht nicht laden</Text>
+        <Text style={{fontSize:12,color:'#7F7B86',lineHeight:18,textAlign:'center'}}>Deine gespeicherten Daten bleiben erhalten. Versuche die Ansicht neu zu laden. Wenn der Fehler wiederkommt, notiere den letzten Schritt vor dem Fehler.</Text>
+        <TouchableOpacity accessibilityRole="button" style={{backgroundColor:'#71558F',borderRadius:16,paddingHorizontal:18,paddingVertical:13}} onPress={()=>this.setState({error:null})}><Text style={{color:'#FFF',fontWeight:'900'}}>Erneut versuchen</Text></TouchableOpacity>
+      </SafeAreaView>;
+    }
+    return this.props.children;
+  }
+}
+
+export default function App(){ return <AppErrorBoundary><NouraApp/></AppErrorBoundary>; }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg, paddingTop: Platform.OS === 'android' ? 20 : 0 },
@@ -1813,6 +1086,15 @@ const styles = StyleSheet.create({
   simpleHomeHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 2 },
   simpleHomeGreeting: { color: colors.text, fontSize: 28, fontWeight: '900', letterSpacing: -0.7 },
   simpleHomeDate: { color: colors.muted, fontSize: 12.5, marginTop: 2 },
+  safetyHomeCard: { flexDirection:'row', gap:11, backgroundColor:'#FFF1E8', borderRadius:20, padding:15, borderWidth:1, borderColor:'#F1C8A8', alignItems:'flex-start' },
+  safetyHomeIcon: { width:28, height:28, borderRadius:14, backgroundColor:'#EFA870', color:'#6C3D18', textAlign:'center', lineHeight:28, fontWeight:'900' },
+  safetyHomeTitle: { color:'#6C3D18', fontSize:13.5, fontWeight:'900' },
+  safetyHomeText: { color:'#74543A', fontSize:11.2, lineHeight:16.5, marginTop:3 },
+  safetyHomeAction: { color:'#6C3D18', fontSize:10.8, lineHeight:16, fontWeight:'800', marginTop:5 },
+  weeklyHomeCard: { backgroundColor:'#F3EEF8', borderRadius:20, padding:15, borderWidth:1, borderColor:'#E1D5EA' },
+  weeklyHomeKicker: { color:colors.purple, fontSize:8.5, fontWeight:'900', letterSpacing:0.9 },
+  weeklyHomeTitle: { color:colors.text, fontSize:13.5, lineHeight:19, fontWeight:'800', marginTop:5 },
+  weeklyHomeMeta: { color:colors.muted, fontSize:10.5, marginTop:6 },
   scoreHero: { flexDirection: 'row', alignItems: 'center', gap: 16, backgroundColor: '#F0F5F1', borderRadius: 26, padding: 18, borderWidth: 1, borderColor: '#DFE9E1' },
   scoreHeroCircle: { width: 86, height: 86, borderRadius: 43, backgroundColor: '#FFFFFF', borderWidth: 7, borderColor: '#8DB799', alignItems: 'center', justifyContent: 'center' },
   scoreHeroValue: { color: colors.text, fontSize: 28, fontWeight: '900', lineHeight: 30 },
@@ -2227,6 +1509,10 @@ const styles = StyleSheet.create({
   aiConnectionTitle: { color: colors.text, fontSize: 13.5, fontWeight: '900' },
   aiConnectionSub: { color: colors.muted, fontSize: 10.5, marginTop: 3 },
   aiPrivacyCard: { backgroundColor: colors.surface, borderRadius: 20, padding: 15, borderWidth: 1, borderColor: colors.line },
+  aiTransmissionCard: { backgroundColor:'#F7F5FA', borderRadius:18, padding:14, borderWidth:1, borderColor:'#E5DFEA', gap:4 },
+  aiTransmissionTitle: { color:colors.text, fontSize:12.5, fontWeight:'900' },
+  aiTransmissionText: { color:'#55515B', fontSize:11.2, lineHeight:16 },
+  aiTransmissionSmall: { color:colors.muted, fontSize:9.8, lineHeight:14.5 },
   aiScopeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 12 },
   aiRunButton: { backgroundColor: colors.purple },
   cleanAIResult: { gap: 13 },
@@ -2317,4 +1603,7 @@ const styles = StyleSheet.create({
   modelRefreshButton: { minHeight: 38, borderRadius: 14, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.purpleSoft },
   modelRefreshText: { color: colors.purple, fontSize: 10.5, fontWeight: '900' },
   modelCountText: { color: colors.muted, fontSize: 9.8, fontWeight: '700' },
+
+  privacyCover: { ...StyleSheet.absoluteFillObject, zIndex: 9999, backgroundColor: '#F7F7F9', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 30 },
+  privacyCoverTitle: { color: '#242329', fontSize: 20, fontWeight: '900' },
 });

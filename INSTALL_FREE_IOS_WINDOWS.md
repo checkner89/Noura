@@ -94,10 +94,16 @@ Typische Punkte:
 - 3-App-Limit bzw. App-ID-Limit des kostenlosen Accounts erreicht.
 - Bei Apple-ID-Fehlern kann je nach Account ein app-spezifisches Passwort nötig sein.
 
-Die Noura-App verwendet derzeit keine kostenpflichtigen Apple-Capabilities wie Push Notifications, iCloud oder HealthKit. Kamera, Netzwerkzugriff und lokale Speicherung sind für diesen Testweg grundsätzlich passend.
+Die Noura-App verwendet in diesem Build keine kostenpflichtigen Apple-Capabilities wie Cloud-Push, iCloud/CloudKit oder HealthKit. Erinnerungen sind lokale Mitteilungen; Apple Health wird über eine vom Nutzer ausgewählte Exportdatei importiert.
 
-## Hinweis ab Noura 0.12
+## Hinweis ab Noura 0.14
 
-Noura nutzt jetzt zusätzliche native Module für Profilbild, Background Tasks und Dateisystem. Nach dem Update musst du die IPA **neu über den GitHub-Workflow bauen**; ein reines JavaScript-Refresh reicht für diese Funktionen nicht.
+Noura nutzt zusätzliche native Module für Profilbild, Background Tasks, lokale Mitteilungen, Foto-/Spracherfassung und PDF-Erstellung. Nach dem Update musst du die IPA **neu über den GitHub-Workflow bauen**; ein reines JavaScript-Refresh reicht für diese Funktionen nicht.
 
 Die tägliche KI-Analyse ist auf iOS opportunistisch: iOS entscheidet den tatsächlichen Ausführungszeitpunkt. Wenn du Noura im App-Switcher aktiv beendest, werden Hintergrundaufgaben bis zum nächsten Start nicht ausgeführt.
+
+## Noura 0.15: HealthKit und iCloud
+
+Der normale kostenlose Workflow baut absichtlich ohne HealthKit-/CloudKit-Entitlements. Apple-Health-Exportimport, lokales Backup und alle normalen Noura-Funktionen bleiben dabei nutzbar.
+
+Für einen entsprechend provisionierten Apple-Developer-Build gibt es zusätzlich den Workflow **Build Noura iOS IPA (HealthKit + iCloud)**. Er aktiviert `NOURA_ENABLE_HEALTHKIT=1` und `NOURA_ENABLE_ICLOUD=1`.

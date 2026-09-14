@@ -8,18 +8,24 @@ export type TrackingPreferences = {
   symptoms: boolean;
   bowel: boolean;
   cycle: boolean;
+  medications: boolean;
   temperature: boolean;
   energy: boolean;
   stress: boolean;
+  weight: boolean;
+  water: boolean;
+  sleep: boolean;
+  movement: boolean;
 };
 
 export type CyclePreferences = {
   averageCycleLength: number;
   periodLength: number;
+  lastPeriodStart?: string;
 };
 
 export type UserProfile = {
-  schemaVersion: 3;
+  schemaVersion: 5;
   completed: boolean;
   displayName?: string;
   profileImageUri?: string;
@@ -50,14 +56,33 @@ export const SYMPTOM_LABELS: Record<SymptomKey, string> = {
 
 export function createDefaultUserProfile(): UserProfile {
   return {
-    schemaVersion: 3,
+    schemaVersion: 5,
     completed: false,
     goals: ['triggers', 'digestion'],
     symptomsToTrack: ['pain', 'bloating'],
-    tracking: { meals: true, symptoms: true, bowel: true, cycle: false, temperature: true, energy: true, stress: true },
+    tracking: {
+      meals: true,
+      symptoms: true,
+      bowel: true,
+      cycle: false,
+      medications: false,
+      temperature: true,
+      energy: true,
+      stress: true,
+      weight: false,
+      water: false,
+      sleep: true,
+      movement: true,
+    },
     cyclePreferences: { averageCycleLength: 28, periodLength: 5 },
     createdAt: new Date().toISOString(),
   };
+}
+
+function safeNumber(value: unknown, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
 }
 
 function migrateUserProfile(value: unknown): UserProfile {
@@ -66,7 +91,7 @@ function migrateUserProfile(value: unknown): UserProfile {
   const candidate = value as any;
   if (!Array.isArray(candidate.goals) || !Array.isArray(candidate.symptomsToTrack) || !candidate.tracking) return fallback;
   return {
-    schemaVersion: 3,
+    schemaVersion: 5,
     completed: !!candidate.completed,
     displayName: candidate.displayName,
     profileImageUri: candidate.profileImageUri,
@@ -77,13 +102,19 @@ function migrateUserProfile(value: unknown): UserProfile {
       symptoms: candidate.tracking.symptoms !== false,
       bowel: candidate.tracking.bowel !== false,
       cycle: candidate.tracking.cycle === true,
+      medications: candidate.tracking.medications === true,
       temperature: candidate.tracking.temperature !== false,
       energy: candidate.tracking.energy !== false,
       stress: candidate.tracking.stress !== false,
+      weight: candidate.tracking.weight === true,
+      water: candidate.tracking.water === true,
+      sleep: candidate.tracking.sleep !== false,
+      movement: candidate.tracking.movement !== false,
     },
     cyclePreferences: {
-      averageCycleLength: Number(candidate.cyclePreferences?.averageCycleLength) || 28,
-      periodLength: Number(candidate.cyclePreferences?.periodLength) || 5,
+      averageCycleLength: safeNumber(candidate.cyclePreferences?.averageCycleLength, 28, 18, 60),
+      periodLength: safeNumber(candidate.cyclePreferences?.periodLength, 5, 1, 14),
+      lastPeriodStart: typeof candidate.cyclePreferences?.lastPeriodStart === 'string' ? candidate.cyclePreferences.lastPeriodStart : undefined,
     },
     createdAt: candidate.createdAt || new Date().toISOString(),
     completedAt: candidate.completedAt,
@@ -96,5 +127,5 @@ export async function loadUserProfile(): Promise<UserProfile> {
   try { return migrateUserProfile(JSON.parse(raw)); } catch { return createDefaultUserProfile(); }
 }
 
-export async function saveUserProfile(profile: UserProfile): Promise<void> { await AsyncStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); }
+export async function saveUserProfile(profile: UserProfile): Promise<void> { await AsyncStorage.setItem(PROFILE_KEY, JSON.stringify({ ...profile, schemaVersion: 5 })); }
 export async function clearUserProfile(): Promise<void> { await AsyncStorage.removeItem(PROFILE_KEY); }

@@ -1,26 +1,15 @@
-name: Build Noura iOS IPA (unsigned)
+name: Build Noura iOS IPA (HealthKit + iCloud)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - 'App.tsx'
-      - 'app.json'
-      - 'app.config.js'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'src/**'
-      - 'assets/**'
-      - '.github/workflows/build-ios-unsigned.yml'
 
 jobs:
   build-ios:
     runs-on: macos-latest
-    env:
-      NOURA_ENABLE_HEALTHKIT: '0'
-      NOURA_ENABLE_ICLOUD: '0'
     timeout-minutes: 45
+    env:
+      NOURA_ENABLE_HEALTHKIT: '1'
+      NOURA_ENABLE_ICLOUD: '1'
 
     steps:
       - name: Checkout
@@ -29,12 +18,12 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.13.1'
 
       - name: Install JavaScript dependencies
         run: npm install
 
-      - name: Generate native iOS project
+      - name: Generate native iOS project with HealthKit and CloudKit
         run: npx expo prebuild --platform ios --clean --non-interactive
 
       - name: Install CocoaPods dependencies
@@ -45,21 +34,14 @@ jobs:
         run: |
           set -euo pipefail
           WORKSPACE="$(find ios -maxdepth 1 -name '*.xcworkspace' -print -quit)"
-          if [ -z "$WORKSPACE" ]; then
-            echo "No .xcworkspace found in ios/"
-            exit 1
-          fi
-
+          if [ -z "$WORKSPACE" ]; then echo "No .xcworkspace found"; exit 1; fi
           SCHEME="$(basename "$WORKSPACE" .xcworkspace)"
-          echo "Workspace: $WORKSPACE"
-          echo "Scheme: $SCHEME"
-
           xcodebuild \
             -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath "$PWD/build" \
+            -derivedDataPath "$PWD/build-full" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -69,22 +51,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -print -quit)"
-          if [ -z "$APP_PATH" ]; then
-            echo "No .app found after build"
-            exit 1
-          fi
-
-          rm -rf Payload Noura-unsigned.ipa
+          APP_PATH="$(find build-full/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then echo "No .app found"; exit 1; fi
+          rm -rf Payload Noura-full-capabilities-unsigned.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          /usr/bin/zip -qry Noura-unsigned.ipa Payload
-          ls -lh Noura-unsigned.ipa
+          /usr/bin/zip -qry Noura-full-capabilities-unsigned.ipa Payload
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Noura-unsigned-ipa
-          path: Noura-unsigned.ipa
+          name: Noura-full-capabilities-unsigned-ipa
+          path: Noura-full-capabilities-unsigned.ipa
           if-no-files-found: error
           retention-days: 14

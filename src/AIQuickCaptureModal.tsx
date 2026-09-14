@@ -13,6 +13,7 @@ import {
   View,
 } from 'react-native';
 import { AIConfig, AIQuickDraft, generateQuickDraft } from './ai';
+import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { MealType } from './types';
 
 type Props = {
@@ -33,14 +34,15 @@ const line = '#E8E5EC';
 
 function clamp(value: number, min = 0, max = 10) { return Math.max(min, Math.min(max, value)); }
 
-function Stepper({ label, value, onChange, max = 10 }: { label: string; value: number; onChange: (value: number) => void; max?: number }) {
+function Stepper({ label, value, onChange, max = 10 }: { label: string; value?: number; onChange: (value: number) => void; max?: number }) {
+  const current = value ?? 0;
   return (
     <View style={styles.stepperRow}>
       <Text style={styles.stepperLabel}>{label}</Text>
       <View style={styles.stepperBox}>
-        <TouchableOpacity onPress={() => onChange(clamp(value - 1, 0, max))} style={styles.stepperButton}><Text style={styles.stepperButtonText}>−</Text></TouchableOpacity>
-        <Text style={styles.stepperValue}>{value}/{max}</Text>
-        <TouchableOpacity onPress={() => onChange(clamp(value + 1, 0, max))} style={styles.stepperButton}><Text style={styles.stepperButtonText}>+</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => onChange(clamp(current - 1, 0, max))} style={styles.stepperButton}><Text style={styles.stepperButtonText}>−</Text></TouchableOpacity>
+        <Text style={styles.stepperValue}>{value == null ? '–' : `${value}/${max}`}</Text>
+        <TouchableOpacity onPress={() => onChange(clamp(current + 1, 0, max))} style={styles.stepperButton}><Text style={styles.stepperButtonText}>+</Text></TouchableOpacity>
       </View>
     </View>
   );
@@ -60,6 +62,21 @@ export default function AIQuickCaptureModal({ visible, config, onClose, onOpenAI
   const [includeBowel, setIncludeBowel] = useState(true);
   const [includeCycle, setIncludeCycle] = useState(true);
   const [includeObservation, setIncludeObservation] = useState(true);
+  const [includeMedications, setIncludeMedications] = useState(true);
+  const [listening, setListening] = useState(false);
+  const [speechError, setSpeechError] = useState('');
+
+  useSpeechRecognitionEvent('result', (event: any) => {
+    const textValue = String(event?.results?.[0]?.transcript || event?.transcript || '').trim();
+    if (textValue) setInput(textValue);
+    if (event?.isFinal) setListening(false);
+  });
+  useSpeechRecognitionEvent('end', () => setListening(false));
+  useSpeechRecognitionEvent('error', (event: any) => {
+    setListening(false);
+    const code = String(event?.error || event?.message || '');
+    if (code && code !== 'aborted') setSpeechError('Spracherkennung konnte nicht gestartet werden. Du kannst weiterhin tippen.');
+  });
 
   useEffect(() => {
     if (!visible) return;
@@ -67,11 +84,13 @@ export default function AIQuickCaptureModal({ visible, config, onClose, onOpenAI
     setDraft(null);
     setError('');
     setLoading(false);
+    setListening(false);
+    setSpeechError('');
   }, [visible]);
 
   const canConfirm = useMemo(() => !!draft && (
-    (!!draft.meal && includeMeal) || (!!draft.symptom && includeSymptom) || (!!draft.bowel && includeBowel) || (!!draft.cycle && includeCycle) || (!!draft.observation && includeObservation)
-  ), [draft, includeMeal, includeSymptom, includeBowel, includeCycle, includeObservation]);
+    (!!draft.meal && includeMeal) || (!!draft.symptom && includeSymptom) || (!!draft.bowel && includeBowel) || (!!draft.cycle && includeCycle) || (!!draft.observation && includeObservation) || (!!draft.medications?.length && includeMedications)
+  ), [draft, includeMeal, includeSymptom, includeBowel, includeCycle, includeObservation, includeMedications]);
 
   const understand = async () => {
     if (!config || !input.trim()) return;
@@ -85,12 +104,24 @@ export default function AIQuickCaptureModal({ visible, config, onClose, onOpenAI
       setIncludeBowel(!!next.bowel);
       setIncludeCycle(!!next.cycle);
       setIncludeObservation(!!next.observation);
+      setIncludeMedications(!!next.medications?.length);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Noura konnte die Eingabe nicht verstehen.');
     } finally {
       setLoading(false);
     }
   };
+
+  const startListening = async () => {
+    setSpeechError('');
+    try {
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!permission?.granted) { setSpeechError('Mikrofon oder Spracherkennung wurde nicht freigegeben.'); return; }
+      setListening(true);
+      ExpoSpeechRecognitionModule.start({ lang: 'de-DE', interimResults: true, continuous: false });
+    } catch { setListening(false); setSpeechError('Spracherkennung ist auf diesem Gerät gerade nicht verfügbar.'); }
+  };
+  const stopListening = () => { try { ExpoSpeechRecognitionModule.stop(); } catch {} setListening(false); };
 
   const updateDraft = (updater: (current: AIQuickDraft) => AIQuickDraft) => setDraft(current => current ? updater(current) : current);
 
@@ -103,6 +134,7 @@ export default function AIQuickCaptureModal({ visible, config, onClose, onOpenAI
       bowel: includeBowel ? draft.bowel : undefined,
       cycle: includeCycle ? draft.cycle : undefined,
       observation: includeObservation ? draft.observation : undefined,
+      medications: includeMedications ? draft.medications : undefined,
     });
     onClose();
   };
@@ -121,10 +153,10 @@ export default function AIQuickCaptureModal({ visible, config, onClose, onOpenAI
             </View>
 
             <View style={styles.hero}>
-              <View style={styles.mic}><Text style={styles.micText}>✦</Text></View>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={listening ? 'Spracherkennung stoppen' : 'Spracherkennung starten'} onPress={listening ? stopListening : startListening} style={[styles.mic, listening && styles.micListening]}><Text style={styles.micText}>{listening ? '■' : '🎙'}</Text></TouchableOpacity>
               <Text style={styles.heroTitle}>Essen + Gefühl in einem Satz</Text>
               <Text style={styles.heroText}>Zum Beispiel: „Ich hatte gerade einen Latte und ein Croissant. Jetzt bin ich ziemlich aufgebläht und habe leichte Bauchschmerzen.“</Text>
-              <Text style={styles.dictationHint}>Du kannst auch einfach über das Mikrofon der iOS-Tastatur diktieren.</Text>
+              <TouchableOpacity onPress={listening ? stopListening : startListening}><Text style={styles.dictationHint}>{listening ? 'Ich höre zu … Tippe zum Stoppen.' : '🎙  Direkt diktieren'}</Text></TouchableOpacity>{speechError ? <Text style={styles.speechError}>{speechError}</Text> : null}
             </View>
 
             {!config ? (
@@ -209,7 +241,7 @@ export default function AIQuickCaptureModal({ visible, config, onClose, onOpenAI
                   <View style={styles.sectionCard}>
                     <View style={styles.sectionHeader}>
                       <View style={styles.sectionIconObservation}><Text>!</Text></View>
-                      <View style={{ flex: 1 }}><Text style={styles.sectionTitle}>Auffälligkeit</Text><Text style={styles.sectionSub}>Freie Beobachtung für spätere Muster</Text></View>
+                      <View style={{ flex: 1 }}><Text style={styles.sectionTitle}>Beobachtung</Text><Text style={styles.sectionSub}>Freie Beobachtung für spätere Muster</Text></View>
                       <SectionToggle enabled={includeObservation} onPress={() => setIncludeObservation(v => !v)} />
                     </View>
                     {includeObservation && <TextInput value={draft.observation.text} onChangeText={(value: string) => updateDraft(d => ({ ...d, observation: d.observation ? { ...d.observation, text: value } : d.observation }))} multiline style={styles.noteInput} />}
@@ -247,6 +279,17 @@ export default function AIQuickCaptureModal({ visible, config, onClose, onOpenAI
                   </View>
                 )}
 
+                {!!draft.medications?.length && (
+                  <View style={styles.sectionCard}>
+                    <View style={styles.sectionHeader}>
+                      <View style={styles.sectionIconMedication}><Text>＋</Text></View>
+                      <View style={{ flex: 1 }}><Text style={styles.sectionTitle}>Medikamente / Supplements</Text><Text style={styles.sectionSub}>Nur ausdrücklich genannte Angaben</Text></View>
+                      <SectionToggle enabled={includeMedications} onPress={() => setIncludeMedications(v => !v)} />
+                    </View>
+                    {includeMedications && draft.medications.map((item, index) => <View key={`${item.name}-${index}`} style={styles.binaryRow}><View style={{flex:1}}><Text style={styles.binaryLabel}>{item.name}</Text><Text style={styles.sectionSub}>{item.kind === 'supplement' ? 'Supplement' : 'Medikament'}{item.dose ? ` · ${item.dose}` : ''}</Text></View></View>)}
+                  </View>
+                )}
+
                 {!!draft.needsClarification.length && (
                   <View style={styles.questionCard}><Text style={styles.questionTitle}>Noch unklar</Text>{draft.needsClarification.map((q, i) => <Text key={`${q}-${i}`} style={styles.questionText}>• {q}</Text>)}</View>
                 )}
@@ -273,9 +316,11 @@ const styles = StyleSheet.create({
   hero: { backgroundColor: purpleSoft, borderRadius: 26, padding: 18, borderWidth: 1, borderColor: '#E2D9EC' },
   mic: { width: 48, height: 48, borderRadius: 24, backgroundColor: purple, alignItems: 'center', justifyContent: 'center' },
   micText: { color: '#FFF', fontWeight: '900', fontSize: 21 },
+  micListening: { backgroundColor: '#C15D62' },
   heroTitle: { color: text, fontSize: 17, fontWeight: '900', marginTop: 12 },
   heroText: { color: muted, fontSize: 13, lineHeight: 19, marginTop: 6 },
-  dictationHint: { color: purple, fontSize: 10.5, lineHeight: 15, fontWeight: '700', marginTop: 9 },
+  dictationHint: { color: purple, fontSize: 11.5, lineHeight: 17, fontWeight: '800', marginTop: 9 },
+  speechError: { color: '#A64640', fontSize: 10.5, lineHeight: 15, marginTop: 6 },
   bigInput: { minHeight: 128, backgroundColor: surface, borderWidth: 1, borderColor: line, borderRadius: 24, padding: 17, color: text, fontSize: 16, lineHeight: 23, textAlignVertical: 'top' },
   privacyHint: { backgroundColor: '#F0F5F1', borderRadius: 15, padding: 11 },
   privacyHintText: { color: '#5F6E63', fontSize: 10.8, lineHeight: 16 },
@@ -299,6 +344,7 @@ const styles = StyleSheet.create({
   sectionIconObservation: { width: 40, height: 40, borderRadius: 14, backgroundColor: '#FFF6DA', alignItems: 'center', justifyContent: 'center' },
   sectionIconCycle: { width: 40, height: 40, borderRadius: 14, backgroundColor: '#F5EAF6', alignItems: 'center', justifyContent: 'center' },
   sectionIconBowel: { width: 40, height: 40, borderRadius: 14, backgroundColor: '#EAF3FA', alignItems: 'center', justifyContent: 'center' },
+  sectionIconMedication: { width: 40, height: 40, borderRadius: 14, backgroundColor: '#E8F6EC', alignItems: 'center', justifyContent: 'center' },
   sectionTitle: { color: text, fontWeight: '900', fontSize: 15.5 },
   sectionSub: { color: muted, fontSize: 10.5, marginTop: 2 },
   toggle: { width: 30, height: 30, borderRadius: 10, borderWidth: 1.5, borderColor: '#C9C5CF', alignItems: 'center', justifyContent: 'center' },
