@@ -2,7 +2,7 @@
   "expo": {
     "name": "Noura",
     "slug": "noura-health-tracker",
-    "version": "0.15.0",
+    "version": "0.16.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
@@ -21,14 +21,14 @@
         "NSMicrophoneUsageDescription": "Noura nutzt das Mikrofon nur, wenn du einen Eintrag diktierst.",
         "NSSpeechRecognitionUsageDescription": "Noura wandelt deine Sprache nur auf Wunsch in Text um, damit du Einträge schneller erfassen kannst."
       },
-      "buildNumber": "8",
+      "buildNumber": "9",
       "config": {
         "usesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "de.noura.healthtracker",
-      "versionCode": 8,
+      "versionCode": 9,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#F7F3EC"
