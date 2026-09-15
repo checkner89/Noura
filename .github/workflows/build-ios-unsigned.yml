@@ -35,6 +35,9 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Install CloudKit Metro peer dependency
+        run: npm install --no-save tsl-apple-cloudkit@^0.2.34
+
       - name: Generate native iOS project
         run: npx expo prebuild --platform ios --clean --non-interactive
 
