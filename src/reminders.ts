@@ -43,14 +43,22 @@ export async function syncRecurringReminders(prefs: AppPreferences, cycleTrackin
     const { hour, minute } = parseTime(prefs.eveningReminderTime, 20, 30);
     await Notifications.scheduleNotificationAsync({
       content: { title: 'Kurzer Noura-Check-in', body: 'Wie war dein Tag? Ein paar Sekunden reichen.', data: { nouraTag: EVENING_ID_KEY, route: 'symptoms' } },
-      trigger: { hour, minute, repeats: true } as any,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DAILY,
+        hour,
+        minute,
+      },
     });
   }
   if (prefs.cycleReminderEnabled && cycleTrackingEnabled) {
     const { hour, minute } = parseTime(prefs.cycleReminderTime, 19, 0);
     await Notifications.scheduleNotificationAsync({
       content: { title: 'Zyklus kurz festhalten', body: 'Nur wenn heute etwas relevant war.', data: { nouraTag: CYCLE_ID_KEY, route: 'cycle' } },
-      trigger: { hour, minute, repeats: true } as any,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DAILY,
+        hour,
+        minute,
+      },
     });
   }
 }
@@ -67,7 +75,7 @@ export async function scheduleMealFollowup(prefs: AppPreferences, mealLabel?: st
       body: mealLabel ? `Kurzer Check-in nach „${mealLabel}“.` : 'Ein kurzer Körper-Check-in hilft Noura bei zeitlichen Mustern.',
       data: { nouraTag: 'meal-followup', route: 'symptoms' },
     },
-    trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds } as any,
+    trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds },
   });
 }
 
@@ -76,7 +84,6 @@ export async function getReminderStatus() {
   const scheduled = await Notifications.getAllScheduledNotificationsAsync();
   return { permission: permission.status, scheduledCount: scheduled.length };
 }
-
 
 export type ReminderRoute = 'symptoms' | 'cycle';
 
