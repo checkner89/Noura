@@ -34,12 +34,12 @@ jobs:
           cache: 'npm'
 
       - name: Install JavaScript dependencies
-        run: npm ci
+        run: npm install
 
       - name: Install CloudKit Metro peer dependency
         run: npm install --no-save tsl-apple-cloudkit@^0.2.34
 
-      - name: Typecheck v0.16
+      - name: Typecheck v0.17
         continue-on-error: true
         run: npm run typecheck
 
