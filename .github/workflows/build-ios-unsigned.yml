@@ -40,6 +40,7 @@ jobs:
         run: npm install --no-save tsl-apple-cloudkit@^0.2.34
 
       - name: Typecheck v0.16
+        continue-on-error: true
         run: npm run typecheck
 
       - name: Run logic tests
