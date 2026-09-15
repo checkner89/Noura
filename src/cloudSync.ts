@@ -1,3 +1,6 @@
+import { requireNativeModule } from 'expo-modules-core';
+import { Platform } from 'react-native';
+
 import { HealthStore } from './types';
 import { UserProfile } from './onboarding';
 import { AppPreferences } from './preferences';
@@ -5,14 +8,35 @@ import { AppPreferences } from './preferences';
 export const NOURA_ICLOUD_CONTAINER = 'iCloud.de.noura.healthtracker';
 export type CloudSnapshot = { schemaVersion: 2; updatedAt: string; healthStore: HealthStore; profile: UserProfile; preferences: Partial<AppPreferences> };
 
-function cloud(): any { try { return require('expo-cloudkit'); } catch { return null; } }
+type CloudKitNativeModule = {
+  configure: (containerId: string) => void;
+  getAccountStatus: () => Promise<string>;
+  saveRecords: (records: any[], database?: string, operationConfig?: any) => Promise<any>;
+  fetchRecord: (recordType: string, recordId: string, zoneName?: string | null, database?: string) => Promise<any>;
+};
+
+let cachedCloudKit: CloudKitNativeModule | null | undefined;
+
+function cloud(): CloudKitNativeModule | null {
+  if (Platform.OS !== 'ios') return null;
+  if (cachedCloudKit !== undefined) return cachedCloudKit;
+
+  try {
+    cachedCloudKit = requireNativeModule<CloudKitNativeModule>('ExpoCloudKit');
+  } catch {
+    cachedCloudKit = null;
+  }
+
+  return cachedCloudKit;
+}
+
 export function isCloudKitModulePresent() { return !!cloud(); }
 
 async function ready() {
   const ck = cloud();
   if (!ck) throw new Error('iCloud-Live-Sync ist in diesem Build nicht enthalten. Backup/Restore funktioniert weiterhin.');
-  ck.configure?.(NOURA_ICLOUD_CONTAINER);
-  const status = await ck.getAccountStatus?.();
+  ck.configure(NOURA_ICLOUD_CONTAINER);
+  const status = await ck.getAccountStatus();
   if (status && status !== 'available') throw new Error('iCloud ist für Noura auf diesem Gerät nicht verfügbar oder nicht angemeldet.');
   return ck;
 }
