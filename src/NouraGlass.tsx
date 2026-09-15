@@ -8,12 +8,13 @@ type Props = {
   interactive?: boolean;
   tintColor?: string;
   clear?: boolean;
+  fallbackColor?: string;
 };
 
-export default function NouraGlass({ style, children, interactive = false, tintColor, clear = false }: Props) {
+export default function NouraGlass({ style, children, interactive = false, tintColor, clear = false, fallbackColor = 'rgba(255,255,255,0.78)' }: Props) {
   const available = Platform.OS === 'ios' && isGlassEffectAPIAvailable() && isLiquidGlassAvailable();
   if (!available) {
-    return <View style={[{ backgroundColor: 'rgba(255,255,255,0.78)' }, style]}>{children}</View>;
+    return <View style={[{ backgroundColor: fallbackColor }, style]}>{children}</View>;
   }
   return (
     <GlassView
