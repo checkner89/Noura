@@ -1,9 +1,17 @@
 {
   "name": "noura-health-tracker",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
+    "prepare:v016": "node scripts/run-v016.cjs",
+    "postinstall": "node scripts/run-v016.cjs",
+    "prestart": "node scripts/run-v016.cjs",
+    "preios": "node scripts/run-v016.cjs",
+    "preandroid": "node scripts/run-v016.cjs",
+    "preweb": "node scripts/run-v016.cjs",
+    "pretypecheck": "node scripts/run-v016.cjs",
+    "pretest:logic": "node scripts/run-v016.cjs",
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
