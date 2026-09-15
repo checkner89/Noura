@@ -1,8 +1,34 @@
-# Noura 0.15 – Quality Release
+# Noura 0.16 – Glass & Usability Release
 
 Noura ist ein privates, diary-first Ernährung-, Symptom-, Verdauungs-, Körper- und Zyklustagebuch mit optionaler eigener KI (BYOK).
 
-## Was 0.15 ergänzt
+## Was 0.16 ergänzt
+
+- Face-ID-Loop behoben: das Face-ID-Systemfenster löst nach erfolgreicher Entsperrung keine erneute Authentifizierung mehr aus
+- neue Zyklus-Datumswahl über einen Monatskalender statt reiner Texteingabe
+  - bereits dokumentierte Zyklustage werden im Kalender markiert
+  - direkter Sprung auf „Heute“
+- der zentrale „+“-Button der Bottom Navigation ist optisch und typografisch mittig ausgerichtet
+- „Liquid Glass“-inspirierter UI-Pass:
+  - transluzente Oberflächen
+  - feinere Hairlines
+  - weichere, größere Radien
+  - dezente Tiefen-/Glas-Schatten
+  - schwebende Bottom Navigation
+  - angepasste Karten, Suche, Dropdowns und Profilflächen
+- synthetischer 28-Tage-Beispieldatensatz direkt aus dem Profil ladbar
+  - Mahlzeiten
+  - Beschwerden
+  - Stuhlgang
+  - Zyklus
+  - Beobachtungen
+  - Supplements
+  - Gewicht, Schritte und Schlaf
+  - bewusst eingebaute Muster, damit Insights und KI-Auswertung sinnvoll getestet werden können
+- Schutz vor versehentlichem Cloud-Testdatenmix: Beispieldaten lassen sich nicht laden, solange iCloud Live-Sync aktiv ist
+- App-Version 0.16.0 / iOS Build 9 / Android VersionCode 9
+
+## Enthalten aus 0.15
 
 - medizinische Guardrails für dokumentierte Warnsignale (z. B. Blut im Stuhl, sehr hohe Temperatur, wiederholt starke Schmerzen)
 - KI-Transparenz vor dem Senden: Anbieter, Modell, Datenumfang, Zeitraum, grobe Token-Obergrenze und Kostenhinweis
@@ -45,7 +71,15 @@ npm.cmd install
 npx.cmd expo start -c
 ```
 
+Beim Installieren bzw. Starten wird der v0.16-App-Transform idempotent angewendet. Er passt die bestehende App-Oberfläche an, ohne zusätzliche native UI-Abhängigkeiten einzuführen.
+
 Hinweis: native Module wie direkter HealthKit- oder CloudKit-Zugriff laufen nicht in Expo Go. Dafür ist ein nativer Build erforderlich.
+
+## Beispieldaten testen
+
+Profil → **Test & Demo** → **Beispieldatensatz laden**.
+
+Der Datensatz ersetzt nur den lokalen Tagebuchstand. Profil und KI-Verbindung bleiben erhalten. Bei aktivem iCloud Live-Sync blockiert Noura den Import der Beispieldaten bewusst, damit synthetische Testdaten nicht mit echten Cloud-Daten vermischt werden.
 
 ## Eigene App auf dem iPhone – kostenloser Apple Account
 
