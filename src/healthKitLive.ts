@@ -1,15 +1,28 @@
+import Constants from 'expo-constants';
 import { HealthMetricEntry, CycleEntry } from './types';
 
 export type LiveHealthResult = { metrics: HealthMetricEntry[]; cycle: CycleEntry[]; sourceRecords: number; note?: string };
 
 function uid(prefix:string, seed:string){ let h=2166136261; for(let i=0;i<seed.length;i+=1)h=Math.imul(h^seed.charCodeAt(i),16777619); return `${prefix}-${(h>>>0).toString(36)}`; }
 function dayStart(daysAgo:number){ const d=new Date(); d.setDate(d.getDate()-daysAgo); d.setHours(0,0,0,0); return d; }
-function maybeModule(): any { try { return require('@appeeky/expo-healthkit'); } catch { return null; } }
 
-export function isDirectHealthKitModulePresent(){ return !!maybeModule(); }
+export function isHealthKitCapabilityEnabled() {
+  return Constants.expoConfig?.extra?.nouraCapabilities?.healthKit === true;
+}
+
+function maybeModule(): any {
+  if (!isHealthKitCapabilityEnabled()) return null;
+  try { return require('@appeeky/expo-healthkit'); } catch { return null; }
+}
+
+export function isDirectHealthKitModulePresent(){ return isHealthKitCapabilityEnabled() && !!maybeModule(); }
 
 export async function requestDirectHealthAccess(): Promise<void> {
-  const hk=maybeModule(); if(!hk) throw new Error('Direkter Apple-Health-Zugriff ist in diesem Build nicht enthalten. Nutze den Export-Import oder installiere einen HealthKit-fähig signierten Build.');
+  if (!isHealthKitCapabilityEnabled()) {
+    throw new Error('Dieser Noura-Build ist nicht mit der Apple-Health-Capability signiert. Nutze den Health-Export-Import oder installiere einen entsprechend signierten Build.');
+  }
+  const hk=maybeModule();
+  if(!hk) throw new Error('Das Apple-Health-Modul ist in diesem Build nicht verfügbar. Nutze den Health-Export-Import.');
   const available = typeof hk.isAvailable === 'function' ? await Promise.resolve(hk.isAvailable()) : true;
   if(!available) throw new Error('Apple Health ist auf diesem Gerät nicht verfügbar.');
   const toRead = [
@@ -31,6 +44,9 @@ async function queryQuantity(hk:any,type:string,unit:string,from:Date,to:Date,ki
 }
 
 export async function syncDirectAppleHealth(days=30): Promise<LiveHealthResult> {
+  if (!isHealthKitCapabilityEnabled()) {
+    throw new Error('Direkter Apple-Health-Sync ist in diesem Sideload-Build deaktiviert, weil die HealthKit-Capability fehlt. Der Health-Export-Import funktioniert weiterhin.');
+  }
   const hk=maybeModule(); if(!hk) throw new Error('Direkter Apple-Health-Zugriff ist in diesem Build nicht enthalten.');
   await requestDirectHealthAccess();
   const from=dayStart(days); const to=new Date();
@@ -44,7 +60,9 @@ export async function syncDirectAppleHealth(days=30): Promise<LiveHealthResult> 
   for(const x of raw){ const d=new Date(x.createdAt); const day=`${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`; const key=`${day}|${x.kind}`; const list=bucket.get(key)||[]; list.push(x); bucket.set(key,list); }
   const metrics:HealthMetricEntry[]=[];
   for(const [key,items] of bucket){
-    const kind=items[0].kind; const latest=items.slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0];
+    const latest=items.slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0];
+    if (!latest) continue;
+    const kind=latest.kind;
     let value:number;
     if(['steps','activeEnergy'].includes(kind)){
       const bySource=new Map<string,number>(); for(const row of items){const src=row.sourceName||'Apple Health';bySource.set(src,(bySource.get(src)||0)+row.value);}
