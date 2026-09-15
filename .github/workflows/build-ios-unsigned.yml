@@ -11,6 +11,7 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'src/**'
+      - 'scripts/**'
       - 'assets/**'
       - '.github/workflows/build-ios-unsigned.yml'
 
@@ -37,6 +38,12 @@ jobs:
 
       - name: Install CloudKit Metro peer dependency
         run: npm install --no-save tsl-apple-cloudkit@^0.2.34
+
+      - name: Typecheck v0.16
+        run: npm run typecheck
+
+      - name: Run logic tests
+        run: npm run test:logic
 
       - name: Generate native iOS project
         run: npx expo prebuild --platform ios --clean --non-interactive
