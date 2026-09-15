@@ -1,3 +1,4 @@
+import Constants from 'expo-constants';
 import { requireNativeModule } from 'expo-modules-core';
 import { Platform } from 'react-native';
 
@@ -17,8 +18,12 @@ type CloudKitNativeModule = {
 
 let cachedCloudKit: CloudKitNativeModule | null | undefined;
 
+export function isICloudCapabilityEnabled() {
+  return Constants.expoConfig?.extra?.nouraCapabilities?.iCloud === true;
+}
+
 function cloud(): CloudKitNativeModule | null {
-  if (Platform.OS !== 'ios') return null;
+  if (Platform.OS !== 'ios' || !isICloudCapabilityEnabled()) return null;
   if (cachedCloudKit !== undefined) return cachedCloudKit;
 
   try {
@@ -30,11 +35,14 @@ function cloud(): CloudKitNativeModule | null {
   return cachedCloudKit;
 }
 
-export function isCloudKitModulePresent() { return !!cloud(); }
+export function isCloudKitModulePresent() { return isICloudCapabilityEnabled() && !!cloud(); }
 
 async function ready() {
+  if (!isICloudCapabilityEnabled()) {
+    throw new Error('Dieser Noura-Build ist nicht mit der iCloud-/CloudKit-Capability signiert. Das lokale Backup und Sichern in iCloud Drive funktionieren weiterhin.');
+  }
   const ck = cloud();
-  if (!ck) throw new Error('iCloud-Live-Sync ist in diesem Build nicht enthalten. Backup/Restore funktioniert weiterhin.');
+  if (!ck) throw new Error('Das CloudKit-Modul ist in diesem Build nicht verfügbar. Backup/Restore funktioniert weiterhin.');
   ck.configure(NOURA_ICLOUD_CONTAINER);
   const status = await ck.getAccountStatus();
   if (status && status !== 'available') throw new Error('iCloud ist für Noura auf diesem Gerät nicht verfügbar oder nicht angemeldet.');
