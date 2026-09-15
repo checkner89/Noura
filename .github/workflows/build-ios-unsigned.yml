@@ -19,8 +19,8 @@ jobs:
   build-ios:
     runs-on: macos-latest
     env:
-      NOURA_ENABLE_HEALTHKIT: '0'
-      NOURA_ENABLE_ICLOUD: '0'
+      NOURA_ENABLE_HEALTHKIT: '1'
+      NOURA_ENABLE_ICLOUD: '1'
     timeout-minutes: 45
 
     steps:
@@ -39,7 +39,7 @@ jobs:
       - name: Install CloudKit Metro peer dependency
         run: npm install --no-save tsl-apple-cloudkit@^0.2.34
 
-      - name: Typecheck v0.17
+      - name: Typecheck v0.18
         continue-on-error: true
         run: npm run typecheck
 
@@ -48,6 +48,21 @@ jobs:
 
       - name: Generate native iOS project
         run: npx expo prebuild --platform ios --clean --non-interactive
+
+      - name: Verify requested Apple entitlements
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENTITLEMENTS="$(find ios -name '*.entitlements' -print -quit)"
+          if [ -z "$ENTITLEMENTS" ]; then
+            echo "No entitlements file generated"
+            exit 1
+          fi
+          echo "Entitlements file: $ENTITLEMENTS"
+          cat "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.healthkit' "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-services' "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-container-identifiers' "$ENTITLEMENTS"
 
       - name: Install CocoaPods dependencies
         run: npx pod-install ios
